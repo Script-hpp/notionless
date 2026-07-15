@@ -1,1 +1,16 @@
-/target
+/target/
+**/*.rs.bk
+
+notion_token.txt
+error.txt
+.env
+exports/
+paperless_config.json
+
+Thumbs.db
+ehthumbs.db
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
