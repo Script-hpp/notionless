@@ -55,3 +55,26 @@ pub enum SyncAction {
     CreateInPaperless,  // Existiert nur in Notion
     UpToDate,           // Beide sind auf dem gleichen Stand
 }
+
+#[derive(Deserialize, Debug)]
+pub struct NotionBlockResponse {
+    pub results: Vec<NotionBlock>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct NotionBlock {
+    pub r#type: String, 
+    pub paragraph: Option<NotionParagraph>,
+    pub heading_1: Option<NotionHeading>,
+    pub heading_2: Option<NotionHeading>,
+    pub heading_3: Option<NotionHeading>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct NotionParagraph { pub rich_text: Vec<NotionRichText> }
+
+#[derive(Deserialize, Debug)]
+pub struct NotionHeading { pub rich_text: Vec<NotionRichText> }
+
+#[derive(Deserialize, Debug)]
+pub struct NotionRichText { pub plain_text: String }

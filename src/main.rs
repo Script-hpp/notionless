@@ -3,7 +3,7 @@ mod helpers;
 
 use model::{PaperlessResponse, NotionResponse};
 use std::collections::HashMap;
-
+use reqwest::multipart;
 
 async fn fetch_paperless_memory(
     client: &reqwest::Client,
@@ -85,6 +85,100 @@ async fn fetch_notion_memory(
     Ok(notion_map)
 }
 
+async fn export_notion_page_content(
+    client: &reqwest::Client,
+    page_id: &str,
+    token: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let url = format!("https://api.notion.com/v1/blocks/{}/children", page_id);
+    let response = client.get(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Notion-Version", "2022-06-28")
+        .send().await?.json::<model::NotionBlockResponse>().await?;
+
+    let mut markdown = String::new();
+    for block in response.results {
+        match block.r#type.as_str() {
+            "paragraph" => if let Some(p) = block.paragraph {
+                let text: String = p.rich_text.iter().map(|t| t.plain_text.as_str()).collect();
+                markdown.push_str(&format!("{}\n\n", text));
+            },
+            "heading_1" => if let Some(h) = block.heading_1 {
+                let text: String = h.rich_text.iter().map(|t| t.plain_text.as_str()).collect();
+                markdown.push_str(&format!("# {}\n\n", text));
+            },
+            "heading_2" => if let Some(h) = block.heading_2 {
+                let text: String = h.rich_text.iter().map(|t| t.plain_text.as_str()).collect();
+                markdown.push_str(&format!("## {}\n\n", text));
+            },
+            "heading_3" => if let Some(h) = block.heading_3 {
+                let text: String = h.rich_text.iter().map(|t| t.plain_text.as_str()).collect();
+                markdown.push_str(&format!("### {}\n\n", text));
+            },
+            _ => {} // Andere Blöcke ignorieren wir fürs Erste
+        }
+    }
+    Ok(markdown)
+}
+
+async fn upload_to_paperless(
+    client: &reqwest::Client,
+    paperless_url: &str,
+    token: &str,
+    notion_id: &str,
+    title: &str,
+    markdown_content: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Sicherheit: Leerzeichen/Zeilenumbrüche aus .env-Variablen strippen
+    let clean_url = paperless_url.trim().trim_end_matches('/');
+    let clean_token = token.trim();
+    
+    // Wir erzwingen HTTPS, falls in der .env noch http:// steht
+    let secure_url = if clean_url.starts_with("http://") {
+        clean_url.replace("http://", "https://")
+    } else {
+        clean_url.to_string()
+    };
+
+    let base_domain = secure_url.split("/api").next().unwrap_or(&secure_url);
+
+    let upload_url = format!("{}/api/documents/post_document/", base_domain);
+
+    // 2. Datei-Part und Metadaten bauen
+    let file_part = multipart::Part::bytes(markdown_content.to_string().into_bytes())
+        .file_name(format!("{}.md", title))
+        .mime_str("text/markdown")?;
+
+    let custom_fields_json = format!("{{\"1\": \"{}\"}}", notion_id);
+    
+    let form = multipart::Form::new()
+        .part("document", file_part)
+        .text("title", title.to_string())
+        .text("custom_fields", custom_fields_json);
+
+    // 3. Request mit Django-CSRF-Panzerung abschicken
+    let response = client.post(&upload_url)
+        .header("Authorization", format!("Token {}", clean_token))
+        .header("Accept", "application/json")
+        .header("Referer", &upload_url)
+        .header("Origin", &secure_url)
+        .multipart(form)
+        .send().await?;
+
+    // 4. Ergebnis auswerten
+    if response.status().is_success() {
+        println!("  ✓ Erfolgreich in Paperless hochgeladen: {}", title);
+    } else {
+        let status = response.status();
+        let error_text = response.text().await?;
+        println!("  ✗ Fehler beim Upload von '{}' (Status: {}):", title, status);
+        println!("    Grund: {}", error_text);
+        println!("    URL war: {}", upload_url);
+    }
+    
+    Ok(())
+}
+
 #[tokio::main]
 async fn main()-> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
@@ -114,6 +208,14 @@ async fn main()-> Result<(), Box<dyn std::error::Error>> {
         match action {
             model::SyncAction::CreateInPaperless => {
                 println!("➔ [NOTION-ID: {}]: Muss in Paperless erstellt werden.", notion_id);
+                if let Some((_, title)) = notion_map.get(notion_id) {
+                    match export_notion_page_content(&client, notion_id, &notion_token).await {
+                        Ok(markdown) => {
+                            let _ = upload_to_paperless(&client, &paperless_url, &paperless_token, notion_id, title, &markdown).await;
+                        }
+                        Err(e) => println!("  ✗ Fehler beim Export aus Notion: {}", e),
+                    }
+                }
             }
             model::SyncAction::UpdateNotion => {
                 println!("➔ [NOTION-ID: {}]: Notion-Eintrag veraltet. Update Notion!", notion_id);
