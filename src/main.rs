@@ -126,10 +126,11 @@ async fn upload_to_paperless(
     paperless_url: &str,
     token: &str,
     notion_id: &str,
+    last_edited_time: &str,
     title: &str,
     markdown_content: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Sicherheit: Leerzeichen/Zeilenumbrüche aus .env-Variablen strippen
+
     let clean_url = paperless_url.trim().trim_end_matches('/');
     let clean_token = token.trim();
     
@@ -144,19 +145,21 @@ async fn upload_to_paperless(
 
     let upload_url = format!("{}/api/documents/post_document/", base_domain);
 
-    // 2. Datei-Part und Metadaten bauen
     let file_part = multipart::Part::bytes(markdown_content.to_string().into_bytes())
         .file_name(format!("{}.md", title))
         .mime_str("text/markdown")?;
 
-    let custom_fields_json = format!("{{\"1\": \"{}\"}}", notion_id);
-    
+    let formatted_date = &last_edited_time[..10];
+    // this needs proper documentation
+    let custom_fields_json = format!(
+            "{{\"1\": \"{}\", \"2\": \"{}\"}}", 
+            notion_id, formatted_date
+        );
     let form = multipart::Form::new()
         .part("document", file_part)
         .text("title", title.to_string())
         .text("custom_fields", custom_fields_json);
 
-    // 3. Request mit Django-CSRF-Panzerung abschicken
     let response = client.post(&upload_url)
         .header("Authorization", format!("Token {}", clean_token))
         .header("Accept", "application/json")
@@ -165,7 +168,6 @@ async fn upload_to_paperless(
         .multipart(form)
         .send().await?;
 
-    // 4. Ergebnis auswerten
     if response.status().is_success() {
         println!("  ✓ Erfolgreich in Paperless hochgeladen: {}", title);
     } else {
@@ -208,10 +210,10 @@ async fn main()-> Result<(), Box<dyn std::error::Error>> {
         match action {
             model::SyncAction::CreateInPaperless => {
                 println!("➔ [NOTION-ID: {}]: Muss in Paperless erstellt werden.", notion_id);
-                if let Some((_, title)) = notion_map.get(notion_id) {
+                if let Some((last_edited_time, title)) = notion_map.get(notion_id) {
                     match export_notion_page_content(&client, notion_id, &notion_token).await {
                         Ok(markdown) => {
-                            let _ = upload_to_paperless(&client, &paperless_url, &paperless_token, notion_id, title, &markdown).await;
+                            let _ = upload_to_paperless(&client, &paperless_url, &paperless_token, notion_id, last_edited_time, title, &markdown).await;
                         }
                         Err(e) => println!("  ✗ Fehler beim Export aus Notion: {}", e),
                     }
