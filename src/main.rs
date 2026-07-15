@@ -2,7 +2,6 @@ mod model;
 mod helpers;
 
 use model::{PaperlessResponse, NotionResponse};
-use helpers::{parse_paperless_date, parse_notion_date};
 use std::collections::HashMap;
 
 
@@ -63,8 +62,8 @@ async fn fetch_notion_memory(
     client: &reqwest::Client,
     url: &str,
     token: &str,
-) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
-    let mut notion_map : HashMap<String, String> = HashMap::new();
+) -> Result<HashMap<String, (String, String)>, Box<dyn std::error::Error>> {
+    let mut notion_map : HashMap<String, (String, String)> = HashMap::new();
     let response = client.post(url)
         .header("Authorization", format!("Bearer {}", token))
         .header("Notion-Version", "2022-06-28")
@@ -74,7 +73,13 @@ async fn fetch_notion_memory(
         .await?;
 
     for page in response.results {
-        notion_map.insert(page.id, page.last_edited_time);
+        // Wir holen den inneren String aus dem NotionText-Struct
+        let title = page.properties.name.title
+            .first()
+            .map(|t| t.plain_text.clone()) // <-- Falls das Feld im Struct "plain_text" heißt, ändere es hier zu t.plain_text.clone()
+            .unwrap_or_else(|| "Untitled".to_string());
+
+        notion_map.insert(page.id, (page.last_edited_time, title));    
     }
 
     Ok(notion_map)

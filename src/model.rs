@@ -29,6 +29,23 @@ pub struct NotionResponse {
 pub struct NotionPage {
     pub id: String,
     pub last_edited_time: String,
+    pub properties: NotionProperties,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct NotionProperties {
+    #[serde(rename = "Name")]
+    pub name: NotionNameProperty,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct NotionNameProperty {
+    pub title: Vec<NotionTitleText>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct NotionTitleText {
+    pub plain_text: String,
 }
 
 #[derive(Debug)]

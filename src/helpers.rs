@@ -16,12 +16,12 @@ pub fn parse_notion_date(date_str: &str) -> Option<DateTime<Utc>> {
 
 pub fn compare_memories(
     paperless: &HashMap<String, String>,
-    notion: &HashMap<String, String>,
+    notion: &HashMap<String, (String, String)>,
 ) -> HashMap<String, SyncAction> {
     let mut actions = HashMap::new();
 
     // Wir gehen durch alle Einträge, die wir in Notion gefunden haben
-    for (notion_id, notion_time_str) in notion {
+    for (notion_id, (notion_time_str, _title)) in notion {
         let notion_time = match parse_notion_date(notion_time_str) {
             Some(dt) => dt,
             None => continue,
