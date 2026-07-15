@@ -120,6 +120,43 @@ async fn export_notion_page_content(
     Ok(markdown)
 }
 
+async fn delete_from_paperless(
+    client: &reqwest::Client,
+    paperless_url: &str,
+    token: &str,
+    document_id: i64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let clean_url = paperless_url.trim().trim_end_matches('/');
+    let clean_token = token.trim();
+    
+    let secure_url = if clean_url.starts_with("http://") {
+        clean_url.replace("http://", "https://")
+    } else {
+        clean_url.to_string()
+    };
+
+    let base_domain = secure_url.split("/api").next().unwrap_or(&secure_url);
+    let delete_url = format!("{}/api/documents/{}/", base_domain, document_id);
+
+    let response = client.delete(&delete_url)
+        .header("Authorization", format!("Token {}", clean_token))
+        .header("Accept", "application/json")
+        .header("Referer", &delete_url)
+        .header("Origin", &secure_url)
+        .send().await?;
+
+    if response.status().is_success() || response.status() == 204 {
+        println!("  ✓ Altes Dokument (ID: {}) erfolgreich aus Paperless gelöscht.", document_id);
+    } else {
+        println!("  ✗ Fehler beim Löschen von ID {} (Status: {}):", document_id, response.status());
+        if let Ok(text) = response.text().await {
+            println!("    Grund: {}", text);
+        }
+    }
+    
+    Ok(())
+}
+
 async fn upload_to_paperless(
     client: &reqwest::Client,
     paperless_url: &str,
@@ -218,9 +255,25 @@ async fn main()-> Result<(), Box<dyn std::error::Error>> {
             }
             model::SyncAction::UpdateNotion => {
                 println!("➔ [NOTION-ID: {}]: Notion-Eintrag veraltet. Update Notion!", notion_id);
+                
             }
             model::SyncAction::UpdatePaperless => {
                 println!("➔ [NOTION-ID: {}]: Paperless-Eintrag veraltet. Update Paperless!", notion_id);
+                if let Some((paperless_id, _)) = paperless_map.get(notion_id) {
+                    if let Some((last_edited_time, title)) = notion_map.get(notion_id) {
+                        println!("  - Lösche alte Version (Paperless ID: {})...", paperless_id);
+                        let _ = delete_from_paperless(&client, &paperless_url, &paperless_token, *paperless_id).await;
+                        match export_notion_page_content(&client, notion_id, &notion_token).await {
+                            Ok(markdown) => {
+                                let _ = upload_to_paperless(
+                                    &client, &paperless_url, &paperless_token, 
+                                    notion_id, last_edited_time, title, &markdown
+                                ).await;
+                            }
+                            Err(e) => println!("  ✗ Fehler beim Export aus Notion: {}", e),
+                        }
+                    }
+                }
             }
             model::SyncAction::UpToDate => {
                 println!("➔ [NOTION-ID: {}]: Bereits auf dem neuesten Stand.", notion_id);

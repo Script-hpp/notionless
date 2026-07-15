@@ -15,7 +15,7 @@ pub fn parse_notion_date(date_str: &str) -> Option<DateTime<Utc>> {
 }
 
 pub fn compare_memories(
-    paperless: &HashMap<String, (i64,String)>,
+    paperless: &HashMap<String, (i64, String)>,
     notion: &HashMap<String, (String, String)>,
 ) -> HashMap<String, SyncAction> {
     let mut actions = HashMap::new();
@@ -28,8 +28,7 @@ pub fn compare_memories(
         };
 
         if let Some((_paperless_id, paperless_time_str)) = paperless.get(notion_id) {
-            // ID existiert in beiden Systemen -> Zeiten vergleichen!
-            if let Some(paperless_time) = parse_paperless_date(paperless_time_str) {
+            if let Some(paperless_time) = parse_notion_date(paperless_time_str) {
                 if paperless_time > notion_time {
                     actions.insert(notion_id.clone(), SyncAction::UpdateNotion);
                 } else if notion_time > paperless_time {
@@ -37,9 +36,10 @@ pub fn compare_memories(
                 } else {
                     actions.insert(notion_id.clone(), SyncAction::UpToDate);
                 }
+            } else {
+                println!("  ✗ Konnte Paperless-Datum nicht parsen: {}", paperless_time_str);
             }
         } else {
-            // ID existiert in Notion, aber noch nicht in Paperless
             actions.insert(notion_id.clone(), SyncAction::CreateInPaperless);
         }
     }
