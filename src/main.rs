@@ -345,13 +345,117 @@ async fn upload_to_paperless(
     Ok(())
 }
 
+/// Führt genau EINEN Synchronisations-Durchlauf aus.
+/// Gibt einen Fehler zurück, statt das Programm zu beenden – die Hauptschleife
+/// fängt ihn ab und läuft beim nächsten Intervall weiter.
+async fn run_sync_cycle(
+    client: &reqwest::Client,
+    paperless_url: &str,
+    paperless_token: &str,
+    notion_url: &str,
+    notion_token: &str
+) -> Result<(), Box<dyn std::error::Error>> {
+    // 1. WICHTIG: Daten in JEDEM Durchlauf neu abfragen!
+    let notion_map = fetch_notion_memory(client, notion_url, notion_token).await?;
+    let paperless_map = fetch_paperless_memory(client, paperless_url, paperless_token).await?;
+
+    // 2. Inhalte EINMAL exportieren, Markdown cachen und Hashes berechnen.
+    //    Der Hash ist die maßgebliche Änderungserkennung (nicht der Zeitstempel).
+    let mut notion_content: HashMap<String, String> = HashMap::new();
+    // notion_id -> (last_edited_time, title, content_hash)
+    let mut notion_full: HashMap<String, (String, String, String)> = HashMap::new();
+    for (notion_id, (last_edited_time, title)) in &notion_map {
+        match export_notion_page_content(client, notion_id, notion_token).await {
+            Ok(markdown) => {
+                let hash = helpers::compute_content_hash(&markdown);
+                notion_full.insert(
+                    notion_id.clone(),
+                    (last_edited_time.clone(), title.clone(), hash),
+                );
+                notion_content.insert(notion_id.clone(), markdown);
+            }
+            Err(e) => println!("  ✗ Fehler beim Export aus Notion ({}): {}", notion_id, e),
+        }
+    }
+
+    if let Some((_, _, notion_hash)) = notion_full.get("39ea261e-0fc5-80e0-94df-d09d18774342") {
+        println!("  [DEBUG] Hash laut Notion:    {}", notion_hash);
+    }
+    if let Some((_, _, paperless_hash)) = paperless_map.get("39ea261e-0fc5-80e0-94df-d09d18774342") {
+        println!("  [DEBUG] Hash laut Paperless: {}", paperless_hash);
+    }
+
+    // 3. WICHTIG: Aktionen mit den frischen Daten neu berechnen!
+    let sync_actions = helpers::compare_memories(&paperless_map, &notion_full);
+
+    for (notion_id, action) in &sync_actions {
+        match action {
+            model::SyncAction::CreateInPaperless => {
+                println!("➔ [NOTION-ID: {}]: Muss in Paperless erstellt werden.", notion_id);
+                if let (Some((last_edited_time, title, hash)), Some(markdown)) =
+                    (notion_full.get(notion_id), notion_content.get(notion_id))
+                {
+                    let _ = upload_to_paperless(
+                        client,
+                        paperless_url,
+                        paperless_token,
+                        notion_id,
+                        last_edited_time,
+                        title,
+                        hash,
+                        markdown
+                    ).await;
+                }
+            }
+            model::SyncAction::UpdateNotion => {
+                println!("➔ [NOTION-ID: {}]: Notion-Eintrag veraltet. Update Notion!", notion_id);
+            }
+            model::SyncAction::UpdatePaperless => {
+                println!("➔ [NOTION-ID: {}]: Paperless-Eintrag veraltet. Update Paperless!", notion_id);
+                if let Some((paperless_id, _, _)) = paperless_map.get(notion_id) {
+                    if let (Some((last_edited_time, title, hash)), Some(markdown)) =
+                        (notion_full.get(notion_id), notion_content.get(notion_id))
+                    {
+                        println!("  - Lösche alte Version (Paperless ID: {})...", paperless_id);
+                        let _ = delete_from_paperless(
+                            client,
+                            paperless_url,
+                            paperless_token,
+                            *paperless_id
+                        ).await;
+                        let unique_markdown = format!("{}\n\n---\n*Letztes Update in Notion: {}*", markdown, last_edited_time);
+                        let _ = upload_to_paperless(
+                            client,
+                            paperless_url,
+                            paperless_token,
+                            notion_id,
+                            last_edited_time,
+                            title,
+                            hash,
+                            &unique_markdown
+                        ).await;
+                    }
+                }
+            }
+            model::SyncAction::UpToDate => {
+                println!("➔ [NOTION-ID: {}]: Bereits auf dem neuesten Stand.", notion_id);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
     println!("Sync Engine is running!");
     
     // Paperless & Notion Setup (Einmalig beim Start)
-    let client = reqwest::Client::new();
+    // Timeout, damit ein hängender Request nicht den ganzen Dienst blockiert.
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?;
     let paperless_url = std::env::var("PAPERLESS_URL").expect("PAPERLESS_URL must be set");
     let paperless_token = std::env::var("PAPERLESS_TOKEN").expect("PAPERLESS_TOKEN must be set");
     let notion_url = std::env::var("NOTION_URL").expect("NOTION_URL must be set");
@@ -365,94 +469,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         println!("\n--- Starte Synchronisation ---");
 
-        // 1. WICHTIG: Daten in JEDEM Durchlauf neu abfragen!
-        let notion_map = fetch_notion_memory(&client, &notion_url, &notion_token).await?;
-        let paperless_map = fetch_paperless_memory(&client, &paperless_url, &paperless_token).await?;
-
-        // 2. Inhalte EINMAL exportieren, Markdown cachen und Hashes berechnen.
-        //    Der Hash ist die maßgebliche Änderungserkennung (nicht der Zeitstempel).
-        let mut notion_content: HashMap<String, String> = HashMap::new();
-        // notion_id -> (last_edited_time, title, content_hash)
-        let mut notion_full: HashMap<String, (String, String, String)> = HashMap::new();
-        for (notion_id, (last_edited_time, title)) in &notion_map {
-            match export_notion_page_content(&client, notion_id, &notion_token).await {
-                Ok(markdown) => {
-                    let hash = helpers::compute_content_hash(&markdown);
-                    notion_full.insert(
-                        notion_id.clone(),
-                        (last_edited_time.clone(), title.clone(), hash),
-                    );
-                    notion_content.insert(notion_id.clone(), markdown);
-                }
-                Err(e) => println!("  ✗ Fehler beim Export aus Notion ({}): {}", notion_id, e),
-            }
+        // Ein Fehler (z. B. Netzwerk-Timeout, API 5xx) beendet NICHT mehr das Programm,
+        // sondern nur diesen Durchlauf. Beim nächsten Intervall wird erneut versucht.
+        if let Err(e) = run_sync_cycle(
+            &client,
+            &paperless_url,
+            &paperless_token,
+            &notion_url,
+            &notion_token
+        ).await {
+            println!("  ✗ Synchronisation fehlgeschlagen: {}", e);
         }
 
-        if let Some((_, _, notion_hash)) = notion_full.get("39ea261e-0fc5-80e0-94df-d09d18774342") {
-            println!("  [DEBUG] Hash laut Notion:    {}", notion_hash);
-        }
-        if let Some((_, _, paperless_hash)) = paperless_map.get("39ea261e-0fc5-80e0-94df-d09d18774342") {
-            println!("  [DEBUG] Hash laut Paperless: {}", paperless_hash);
-        }
-
-        // 3. WICHTIG: Aktionen mit den frischen Daten neu berechnen!
-        let sync_actions = helpers::compare_memories(&paperless_map, &notion_full);
-
-        for (notion_id, action) in &sync_actions {
-            match action {
-                model::SyncAction::CreateInPaperless => {
-                    println!("➔ [NOTION-ID: {}]: Muss in Paperless erstellt werden.", notion_id);
-                    if let (Some((last_edited_time, title, hash)), Some(markdown)) =
-                        (notion_full.get(notion_id), notion_content.get(notion_id))
-                    {
-                        let _ = upload_to_paperless(
-                            &client,
-                            &paperless_url,
-                            &paperless_token,
-                            notion_id,
-                            last_edited_time,
-                            title,
-                            hash,
-                            markdown
-                        ).await;
-                    }
-                }
-                model::SyncAction::UpdateNotion => {
-                    println!("➔ [NOTION-ID: {}]: Notion-Eintrag veraltet. Update Notion!", notion_id);
-                }
-                model::SyncAction::UpdatePaperless => {
-                    println!("➔ [NOTION-ID: {}]: Paperless-Eintrag veraltet. Update Paperless!", notion_id);
-                    if let Some((paperless_id, _, _)) = paperless_map.get(notion_id) {
-                        if let (Some((last_edited_time, title, hash)), Some(markdown)) =
-                            (notion_full.get(notion_id), notion_content.get(notion_id))
-                        {
-                            println!("  - Lösche alte Version (Paperless ID: {})...", paperless_id);
-                            let _ = delete_from_paperless(
-                                &client,
-                                &paperless_url,
-                                &paperless_token,
-                                *paperless_id
-                            ).await;
-                            let unique_markdown = format!("{}\n\n---\n*Letztes Update in Notion: {}*", markdown, last_edited_time);
-                            let _ = upload_to_paperless(
-                                &client,
-                                &paperless_url,
-                                &paperless_token,
-                                notion_id,
-                                last_edited_time,
-                                title,
-                                hash,
-                                &unique_markdown
-                            ).await;
-                        }
-                    }
-                }
-                model::SyncAction::UpToDate => {
-                    println!("➔ [NOTION-ID: {}]: Bereits auf dem neuesten Stand.", notion_id);
-                }
-            }
-        }
-        
         println!(
             "Abgeschlossene Synchronisation. Warte {} Sekunden bis zum nächsten Durchlauf...",
             sync_interval.as_secs()
