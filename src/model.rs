@@ -3,6 +3,7 @@ use serde::Deserialize;
 #[derive(Deserialize, Debug)]
 pub struct PaperlessDocument
 {
+    pub id: i64,
     pub custom_fields: Vec<CustomFields>,
 }
 

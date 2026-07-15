@@ -9,8 +9,8 @@ async fn fetch_paperless_memory(
     client: &reqwest::Client,
     start_url: &str,
     token: &str,
-) -> Result<HashMap<String, String>,Box<dyn std::error::Error>> {
-    let mut paperless_map : HashMap<String, String> = HashMap::new();
+) -> Result<HashMap<String, (i64,String)>,Box<dyn std::error::Error>> {
+    let mut paperless_map : HashMap<String, (i64, String)> = HashMap::new();
     let mut current_url : Option<String> = Some(start_url.to_string());
 
     while let Some(url) = current_url {
@@ -20,20 +20,19 @@ async fn fetch_paperless_memory(
             .await?
             .json::<PaperlessResponse>()
             .await?;
-        // println!("ROHDATEN AUS PAPERLESS: {:#?}", response);
         for doc in response.results {
             let mut notion_id : Option<String> = None;
             let mut notion_last_edited : Option<String> = None;
             for custom_field in doc.custom_fields {
                 if custom_field.field == 1 {
                     notion_id = custom_field.value;
-                } else if custom_field.field == 2 {
+                } else if custom_field.field == 4 {
                     notion_last_edited = custom_field.value;
                 }
             }
 
             if let (Some(id), Some(edited)) = (notion_id.as_ref(), notion_last_edited.as_ref()) {
-                    paperless_map.insert(id.clone(), edited.clone());
+                    paperless_map.insert(id.clone(), (doc.id, edited.clone()));
                 }
         }
 
@@ -76,7 +75,7 @@ async fn fetch_notion_memory(
         // Wir holen den inneren String aus dem NotionText-Struct
         let title = page.properties.name.title
             .first()
-            .map(|t| t.plain_text.clone()) // <-- Falls das Feld im Struct "plain_text" heißt, ändere es hier zu t.plain_text.clone()
+            .map(|t| t.plain_text.clone())
             .unwrap_or_else(|| "Untitled".to_string());
 
         notion_map.insert(page.id, (page.last_edited_time, title));    
@@ -115,7 +114,7 @@ async fn export_notion_page_content(
                 let text: String = h.rich_text.iter().map(|t| t.plain_text.as_str()).collect();
                 markdown.push_str(&format!("### {}\n\n", text));
             },
-            _ => {} // Andere Blöcke ignorieren wir fürs Erste
+            _ => {}
         }
     }
     Ok(markdown)
@@ -134,7 +133,6 @@ async fn upload_to_paperless(
     let clean_url = paperless_url.trim().trim_end_matches('/');
     let clean_token = token.trim();
     
-    // Wir erzwingen HTTPS, falls in der .env noch http:// steht
     let secure_url = if clean_url.starts_with("http://") {
         clean_url.replace("http://", "https://")
     } else {
@@ -149,11 +147,10 @@ async fn upload_to_paperless(
         .file_name(format!("{}.md", title))
         .mime_str("text/markdown")?;
 
-    let formatted_date = &last_edited_time[..10];
     // this needs proper documentation
     let custom_fields_json = format!(
-            "{{\"1\": \"{}\", \"2\": \"{}\"}}", 
-            notion_id, formatted_date
+            "{{\"1\": \"{}\", \"4\": \"{}\"}}", 
+            notion_id, last_edited_time
         );
     let form = multipart::Form::new()
         .part("document", file_part)
