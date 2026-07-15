@@ -24,6 +24,10 @@ pub struct CustomFields
 #[derive(Deserialize, Debug)]
 pub struct NotionResponse {
     pub results: Vec<NotionPage>,
+    #[serde(default)]
+    pub has_more: bool,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]

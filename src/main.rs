@@ -1,84 +1,116 @@
 mod model;
 mod helpers;
 
-use model::{PaperlessResponse, NotionResponse};
+use model::{ PaperlessResponse, NotionResponse };
+use std::time::Duration;
+use tokio::time::sleep;
 use std::collections::HashMap;
 use reqwest::multipart;
+
+// Paperless Custom-Field-IDs. Field 5 muss in Paperless als Textfeld angelegt sein
+// und speichert den SHA-256 des zuletzt hochgeladenen Notion-Inhalts.
+const FIELD_NOTION_ID: i64 = 1;
+const FIELD_LAST_EDITED: i64 = 4;
+const FIELD_CONTENT_HASH: i64 = 5;
 
 async fn fetch_paperless_memory(
     client: &reqwest::Client,
     start_url: &str,
-    token: &str,
-) -> Result<HashMap<String, (i64,String)>,Box<dyn std::error::Error>> {
-    let mut paperless_map : HashMap<String, (i64, String)> = HashMap::new();
-    let mut current_url : Option<String> = Some(start_url.to_string());
+    token: &str
+) -> Result<HashMap<String, (i64, String, String)>, Box<dyn std::error::Error>> {
+    // notion_id -> (paperless_id, last_edited_time, content_hash)
+    let mut paperless_map: HashMap<String, (i64, String, String)> = HashMap::new();
+    let mut current_url: Option<String> = Some(start_url.to_string());
 
     while let Some(url) = current_url {
-        let response = client.get(url)
+        let response = client
+            .get(url)
             .header("Authorization", format!("Token {}", token))
-            .send()
-            .await?
-            .json::<PaperlessResponse>()
-            .await?;
+            .send().await?
+            .json::<PaperlessResponse>().await?;
         for doc in response.results {
-            let mut notion_id : Option<String> = None;
-            let mut notion_last_edited : Option<String> = None;
+            let mut notion_id: Option<String> = None;
+            let mut notion_last_edited: Option<String> = None;
+            let mut content_hash: Option<String> = None;
             for custom_field in doc.custom_fields {
-                if custom_field.field == 1 {
+                if custom_field.field == FIELD_NOTION_ID {
                     notion_id = custom_field.value;
-                } else if custom_field.field == 4 {
+                } else if custom_field.field == FIELD_LAST_EDITED {
                     notion_last_edited = custom_field.value;
+                } else if custom_field.field == FIELD_CONTENT_HASH {
+                    content_hash = custom_field.value;
                 }
             }
 
             if let (Some(id), Some(edited)) = (notion_id.as_ref(), notion_last_edited.as_ref()) {
-                    paperless_map.insert(id.clone(), (doc.id, edited.clone()));
-                }
+                let hash = content_hash.unwrap_or_default();
+                paperless_map.insert(id.clone(), (doc.id, edited.clone(), hash));
+            }
         }
 
-            current_url = response.next.map(|mut url| {
-                // very secure fix dont try it at home
-                if url.starts_with("http://") {
-                    url = url.replace("http://", "https://");
-                }
+        current_url = response.next.map(|mut url| {
+            // very secure fix dont try it at home
+            if url.starts_with("http://") {
+                url = url.replace("http://", "https://");
+            }
 
-                if let Some(query_idx) = url.find('?') {
-                    let base = &url[..query_idx];
-                    if !base.ends_with('/') {
-                        url.insert(query_idx, '/');
-                    }
-                } else if !url.ends_with('/') {
-                    url.push('/');
+            if let Some(query_idx) = url.find('?') {
+                let base = &url[..query_idx];
+                if !base.ends_with('/') {
+                    url.insert(query_idx, '/');
                 }
-                url
-        });    
+            } else if !url.ends_with('/') {
+                url.push('/');
+            }
+            url
+        });
     }
-    
+
     Ok(paperless_map)
 }
 
 async fn fetch_notion_memory(
     client: &reqwest::Client,
     url: &str,
-    token: &str,
+    token: &str
 ) -> Result<HashMap<String, (String, String)>, Box<dyn std::error::Error>> {
-    let mut notion_map : HashMap<String, (String, String)> = HashMap::new();
-    let response = client.post(url)
-        .header("Authorization", format!("Bearer {}", token))
-        .header("Notion-Version", "2022-06-28")
-        .send()
-        .await?
-        .json::<NotionResponse>()
-        .await?;
+    let mut notion_map: HashMap<String, (String, String)> = HashMap::new();
+    let mut start_cursor: Option<String> = None;
 
-    for page in response.results {
-        // Wir holen den inneren String aus dem NotionText-Struct
-        let title = page.properties.name.title
-            .first()
-            .map(|t| t.plain_text.clone())
-            .unwrap_or_else(|| "Untitled".to_string());
+    // Notion liefert max. 100 Ergebnisse pro Seite -> so lange abfragen,
+    // bis has_more == false ist.
+    loop {
+        let mut body = serde_json::json!({ "page_size": 100 });
+        if let Some(cursor) = &start_cursor {
+            body["start_cursor"] = serde_json::json!(cursor);
+        }
 
-        notion_map.insert(page.id, (page.last_edited_time, title));    
+        let response = client
+            .post(url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Notion-Version", "2022-06-28")
+            .json(&body)
+            .send().await?
+            .json::<NotionResponse>().await?;
+
+        for page in response.results {
+            // Wir holen den inneren String aus dem NotionText-Struct
+            let title = page.properties.name.title
+                .first()
+                .map(|t| t.plain_text.clone())
+                .unwrap_or_else(|| "Untitled".to_string());
+
+            notion_map.insert(page.id, (page.last_edited_time, title));
+        }
+
+        if response.has_more {
+            match response.next_cursor {
+                Some(cursor) => start_cursor = Some(cursor),
+                None => break,
+            }
+        } else {
+            break;
+        }
     }
 
     Ok(notion_map)
@@ -87,33 +119,47 @@ async fn fetch_notion_memory(
 async fn export_notion_page_content(
     client: &reqwest::Client,
     page_id: &str,
-    token: &str,
+    token: &str
 ) -> Result<String, Box<dyn std::error::Error>> {
     let url = format!("https://api.notion.com/v1/blocks/{}/children", page_id);
-    let response = client.get(&url)
+    let response = client
+        .get(&url)
         .header("Authorization", format!("Bearer {}", token))
         .header("Notion-Version", "2022-06-28")
-        .send().await?.json::<model::NotionBlockResponse>().await?;
+        .send().await?
+        .json::<model::NotionBlockResponse>().await?;
 
     let mut markdown = String::new();
     for block in response.results {
         match block.r#type.as_str() {
             "paragraph" => if let Some(p) = block.paragraph {
-                let text: String = p.rich_text.iter().map(|t| t.plain_text.as_str()).collect();
+                let text: String = p.rich_text
+                    .iter()
+                    .map(|t| t.plain_text.as_str())
+                    .collect();
                 markdown.push_str(&format!("{}\n\n", text));
-            },
+            }
             "heading_1" => if let Some(h) = block.heading_1 {
-                let text: String = h.rich_text.iter().map(|t| t.plain_text.as_str()).collect();
+                let text: String = h.rich_text
+                    .iter()
+                    .map(|t| t.plain_text.as_str())
+                    .collect();
                 markdown.push_str(&format!("# {}\n\n", text));
-            },
+            }
             "heading_2" => if let Some(h) = block.heading_2 {
-                let text: String = h.rich_text.iter().map(|t| t.plain_text.as_str()).collect();
+                let text: String = h.rich_text
+                    .iter()
+                    .map(|t| t.plain_text.as_str())
+                    .collect();
                 markdown.push_str(&format!("## {}\n\n", text));
-            },
+            }
             "heading_3" => if let Some(h) = block.heading_3 {
-                let text: String = h.rich_text.iter().map(|t| t.plain_text.as_str()).collect();
+                let text: String = h.rich_text
+                    .iter()
+                    .map(|t| t.plain_text.as_str())
+                    .collect();
                 markdown.push_str(&format!("### {}\n\n", text));
-            },
+            }
             _ => {}
         }
     }
@@ -124,11 +170,11 @@ async fn delete_from_paperless(
     client: &reqwest::Client,
     paperless_url: &str,
     token: &str,
-    document_id: i64,
+    document_id: i64
 ) -> Result<(), Box<dyn std::error::Error>> {
     let clean_url = paperless_url.trim().trim_end_matches('/');
     let clean_token = token.trim();
-    
+
     let secure_url = if clean_url.starts_with("http://") {
         clean_url.replace("http://", "https://")
     } else {
@@ -138,7 +184,8 @@ async fn delete_from_paperless(
     let base_domain = secure_url.split("/api").next().unwrap_or(&secure_url);
     let delete_url = format!("{}/api/documents/{}/", base_domain, document_id);
 
-    let response = client.delete(&delete_url)
+    let response = client
+        .delete(&delete_url)
         .header("Authorization", format!("Token {}", clean_token))
         .header("Accept", "application/json")
         .header("Referer", &delete_url)
@@ -146,14 +193,83 @@ async fn delete_from_paperless(
         .send().await?;
 
     if response.status().is_success() || response.status() == 204 {
-        println!("  ✓ Altes Dokument (ID: {}) erfolgreich aus Paperless gelöscht.", document_id);
+        println!("  ✓ Altes Dokument (ID: {}) in den Papierkorb verschoben.", document_id);
+
+        // WICHTIG: DELETE verschiebt nur in den Papierkorb. Paperless' Duplikat-Prüfung
+        // durchsucht den Papierkorb mit -> ein Re-Upload würde sonst als
+        // "It is a duplicate ... existing document is in the trash" abgelehnt.
+        // Deshalb endgültig aus dem Papierkorb entfernen.
+        let trash_url = format!("{}/api/trash/", base_domain);
+        let trash_body = serde_json::json!({ "action": "empty", "documents": [document_id] });
+        let trash_response = client
+            .post(&trash_url)
+            .header("Authorization", format!("Token {}", clean_token))
+            .header("Accept", "application/json")
+            .json(&trash_body)
+            .send().await?;
+
+        if trash_response.status().is_success() {
+            println!("  ✓ Dokument (ID: {}) endgültig aus dem Papierkorb entfernt.", document_id);
+        } else {
+            let status = trash_response.status();
+            println!("  ⚠ Konnte Papierkorb für ID {} nicht leeren (Status: {}). Re-Upload könnte als Duplikat scheitern.", document_id, status);
+            if let Ok(text) = trash_response.text().await {
+                println!("    Grund: {}", text);
+            }
+        }
     } else {
         println!("  ✗ Fehler beim Löschen von ID {} (Status: {}):", document_id, response.status());
         if let Ok(text) = response.text().await {
             println!("    Grund: {}", text);
         }
     }
-    
+
+    Ok(())
+}
+
+/// Paperless verarbeitet Uploads asynchron. `post_document` liefert nur eine Task-ID;
+/// ob das Dokument wirklich aufgenommen wurde (oder z. B. als Duplikat abgelehnt), steht
+/// erst danach im Task-Status. Wir pollen deshalb und loggen das echte Ergebnis IMMER.
+async fn wait_for_task(
+    client: &reqwest::Client,
+    base_domain: &str,
+    token: &str,
+    task_id: &str,
+    title: &str
+) -> Result<(), Box<dyn std::error::Error>> {
+    let tasks_url = format!("{}/api/tasks/?task_id={}", base_domain, task_id);
+
+    for _ in 0..10 {
+        let tasks: Vec<serde_json::Value> = client
+            .get(&tasks_url)
+            .header("Authorization", format!("Token {}", token))
+            .header("Accept", "application/json")
+            .send().await?
+            .json().await?;
+
+        if let Some(task) = tasks.first() {
+            let status = task.get("status").and_then(|s| s.as_str()).unwrap_or("UNKNOWN");
+            match status {
+                "SUCCESS" => {
+                    println!("  ✓ Paperless hat '{}' erfolgreich aufgenommen.", title);
+                    return Ok(());
+                }
+                "FAILURE" => {
+                    let result = task
+                        .get("result")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("(kein Grund angegeben)");
+                    println!("  ✗ Paperless hat '{}' ABGELEHNT (Task {}): {}", title, task_id, result);
+                    return Ok(());
+                }
+                _ => {} // PENDING / STARTED / RECEIVED -> weiter warten
+            }
+        }
+
+        sleep(Duration::from_secs(2)).await;
+    }
+
+    println!("  ⚠ Task {} für '{}' nicht rechtzeitig abgeschlossen (Timeout beim Warten).", task_id, title);
     Ok(())
 }
 
@@ -164,12 +280,12 @@ async fn upload_to_paperless(
     notion_id: &str,
     last_edited_time: &str,
     title: &str,
-    markdown_content: &str,
+    content_hash: &str,
+    markdown_content: &str
 ) -> Result<(), Box<dyn std::error::Error>> {
-
     let clean_url = paperless_url.trim().trim_end_matches('/');
     let clean_token = token.trim();
-    
+
     let secure_url = if clean_url.starts_with("http://") {
         clean_url.replace("http://", "https://")
     } else {
@@ -180,21 +296,26 @@ async fn upload_to_paperless(
 
     let upload_url = format!("{}/api/documents/post_document/", base_domain);
 
-    let file_part = multipart::Part::bytes(markdown_content.to_string().into_bytes())
+    let file_part = multipart::Part
+        ::bytes(markdown_content.to_string().into_bytes())
         .file_name(format!("{}.md", title))
         .mime_str("text/markdown")?;
 
-    // this needs proper documentation
+    // Feld 1 = Notion-ID, Feld 4 = last_edited_time, Feld 5 = SHA-256 des Inhalts
     let custom_fields_json = format!(
-            "{{\"1\": \"{}\", \"4\": \"{}\"}}", 
-            notion_id, last_edited_time
-        );
-    let form = multipart::Form::new()
+        "{{\"{}\": \"{}\", \"{}\": \"{}\", \"{}\": \"{}\"}}",
+        FIELD_NOTION_ID, notion_id,
+        FIELD_LAST_EDITED, last_edited_time,
+        FIELD_CONTENT_HASH, content_hash
+    );
+    let form = multipart::Form
+        ::new()
         .part("document", file_part)
         .text("title", title.to_string())
         .text("custom_fields", custom_fields_json);
 
-    let response = client.post(&upload_url)
+    let response = client
+        .post(&upload_url)
         .header("Authorization", format!("Token {}", clean_token))
         .header("Accept", "application/json")
         .header("Referer", &upload_url)
@@ -203,7 +324,16 @@ async fn upload_to_paperless(
         .send().await?;
 
     if response.status().is_success() {
-        println!("  ✓ Erfolgreich in Paperless hochgeladen: {}", title);
+        // Body ist die Task-ID (JSON-String). Nur "angenommen" != "aufgenommen":
+        // die echte Duplikat-/Fehlerinfo kommt erst aus dem Task-Status.
+        let task_id: String = response.json().await.unwrap_or_default();
+        let task_id = task_id.trim().to_string();
+        if task_id.is_empty() {
+            println!("  ⚠ Upload von '{}' angenommen, aber keine Task-ID erhalten.", title);
+        } else {
+            println!("  … Upload von '{}' angenommen (Task {}). Warte auf Verarbeitung…", title, task_id);
+            let _ = wait_for_task(client, base_domain, clean_token, &task_id, title).await;
+        }
     } else {
         let status = response.status();
         let error_text = response.text().await?;
@@ -211,75 +341,122 @@ async fn upload_to_paperless(
         println!("    Grund: {}", error_text);
         println!("    URL war: {}", upload_url);
     }
-    
+
     Ok(())
 }
 
 #[tokio::main]
-async fn main()-> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
     println!("Sync Engine is running!");
-    // Paperless Setup
+    
+    // Paperless & Notion Setup (Einmalig beim Start)
     let client = reqwest::Client::new();
     let paperless_url = std::env::var("PAPERLESS_URL").expect("PAPERLESS_URL must be set");
     let paperless_token = std::env::var("PAPERLESS_TOKEN").expect("PAPERLESS_TOKEN must be set");
-
-    // Notion Setup
     let notion_url = std::env::var("NOTION_URL").expect("NOTION_URL must be set");
     let notion_token = std::env::var("NOTION_TOKEN").expect("NOTION_TOKEN must be set");
-    
-    let notion_map = fetch_notion_memory(&client, &notion_url, &notion_token).await?;
-    let paperless_map = fetch_paperless_memory(&client, &paperless_url, &paperless_token).await?;
 
+    let sync_interval = Duration::from_secs(300); // 5 Minuten
 
-    println!("Paperless Memory: {:?}", paperless_map);
-    println!("Notion Memory: {:?}", notion_map);
+    // ==================================================
+    // DER REAKTIVE ZYKLUS (Hier beginnt die Schleife)
+    // ==================================================
+    loop {
+        println!("\n--- Starte Synchronisation ---");
 
-    // 3. Abgleich berechnen
-    println!("\n--- Berechne Synchronisation ---");
-    let sync_actions = helpers::compare_memories(&paperless_map, &notion_map);
+        // 1. WICHTIG: Daten in JEDEM Durchlauf neu abfragen!
+        let notion_map = fetch_notion_memory(&client, &notion_url, &notion_token).await?;
+        let paperless_map = fetch_paperless_memory(&client, &paperless_url, &paperless_token).await?;
 
-    // 4. Ergebnisse ausgeben
-    for (notion_id, action) in &sync_actions {
-        match action {
-            model::SyncAction::CreateInPaperless => {
-                println!("➔ [NOTION-ID: {}]: Muss in Paperless erstellt werden.", notion_id);
-                if let Some((last_edited_time, title)) = notion_map.get(notion_id) {
-                    match export_notion_page_content(&client, notion_id, &notion_token).await {
-                        Ok(markdown) => {
-                            let _ = upload_to_paperless(&client, &paperless_url, &paperless_token, notion_id, last_edited_time, title, &markdown).await;
-                        }
-                        Err(e) => println!("  ✗ Fehler beim Export aus Notion: {}", e),
-                    }
+        // 2. Inhalte EINMAL exportieren, Markdown cachen und Hashes berechnen.
+        //    Der Hash ist die maßgebliche Änderungserkennung (nicht der Zeitstempel).
+        let mut notion_content: HashMap<String, String> = HashMap::new();
+        // notion_id -> (last_edited_time, title, content_hash)
+        let mut notion_full: HashMap<String, (String, String, String)> = HashMap::new();
+        for (notion_id, (last_edited_time, title)) in &notion_map {
+            match export_notion_page_content(&client, notion_id, &notion_token).await {
+                Ok(markdown) => {
+                    let hash = helpers::compute_content_hash(&markdown);
+                    notion_full.insert(
+                        notion_id.clone(),
+                        (last_edited_time.clone(), title.clone(), hash),
+                    );
+                    notion_content.insert(notion_id.clone(), markdown);
                 }
-            }
-            model::SyncAction::UpdateNotion => {
-                println!("➔ [NOTION-ID: {}]: Notion-Eintrag veraltet. Update Notion!", notion_id);
-                
-            }
-            model::SyncAction::UpdatePaperless => {
-                println!("➔ [NOTION-ID: {}]: Paperless-Eintrag veraltet. Update Paperless!", notion_id);
-                if let Some((paperless_id, _)) = paperless_map.get(notion_id) {
-                    if let Some((last_edited_time, title)) = notion_map.get(notion_id) {
-                        println!("  - Lösche alte Version (Paperless ID: {})...", paperless_id);
-                        let _ = delete_from_paperless(&client, &paperless_url, &paperless_token, *paperless_id).await;
-                        match export_notion_page_content(&client, notion_id, &notion_token).await {
-                            Ok(markdown) => {
-                                let _ = upload_to_paperless(
-                                    &client, &paperless_url, &paperless_token, 
-                                    notion_id, last_edited_time, title, &markdown
-                                ).await;
-                            }
-                            Err(e) => println!("  ✗ Fehler beim Export aus Notion: {}", e),
-                        }
-                    }
-                }
-            }
-            model::SyncAction::UpToDate => {
-                println!("➔ [NOTION-ID: {}]: Bereits auf dem neuesten Stand.", notion_id);
+                Err(e) => println!("  ✗ Fehler beim Export aus Notion ({}): {}", notion_id, e),
             }
         }
-    }
 
-    Ok(())
+        if let Some((_, _, notion_hash)) = notion_full.get("39ea261e-0fc5-80e0-94df-d09d18774342") {
+            println!("  [DEBUG] Hash laut Notion:    {}", notion_hash);
+        }
+        if let Some((_, _, paperless_hash)) = paperless_map.get("39ea261e-0fc5-80e0-94df-d09d18774342") {
+            println!("  [DEBUG] Hash laut Paperless: {}", paperless_hash);
+        }
+
+        // 3. WICHTIG: Aktionen mit den frischen Daten neu berechnen!
+        let sync_actions = helpers::compare_memories(&paperless_map, &notion_full);
+
+        for (notion_id, action) in &sync_actions {
+            match action {
+                model::SyncAction::CreateInPaperless => {
+                    println!("➔ [NOTION-ID: {}]: Muss in Paperless erstellt werden.", notion_id);
+                    if let (Some((last_edited_time, title, hash)), Some(markdown)) =
+                        (notion_full.get(notion_id), notion_content.get(notion_id))
+                    {
+                        let _ = upload_to_paperless(
+                            &client,
+                            &paperless_url,
+                            &paperless_token,
+                            notion_id,
+                            last_edited_time,
+                            title,
+                            hash,
+                            markdown
+                        ).await;
+                    }
+                }
+                model::SyncAction::UpdateNotion => {
+                    println!("➔ [NOTION-ID: {}]: Notion-Eintrag veraltet. Update Notion!", notion_id);
+                }
+                model::SyncAction::UpdatePaperless => {
+                    println!("➔ [NOTION-ID: {}]: Paperless-Eintrag veraltet. Update Paperless!", notion_id);
+                    if let Some((paperless_id, _, _)) = paperless_map.get(notion_id) {
+                        if let (Some((last_edited_time, title, hash)), Some(markdown)) =
+                            (notion_full.get(notion_id), notion_content.get(notion_id))
+                        {
+                            println!("  - Lösche alte Version (Paperless ID: {})...", paperless_id);
+                            let _ = delete_from_paperless(
+                                &client,
+                                &paperless_url,
+                                &paperless_token,
+                                *paperless_id
+                            ).await;
+                            let unique_markdown = format!("{}\n\n---\n*Letztes Update in Notion: {}*", markdown, last_edited_time);
+                            let _ = upload_to_paperless(
+                                &client,
+                                &paperless_url,
+                                &paperless_token,
+                                notion_id,
+                                last_edited_time,
+                                title,
+                                hash,
+                                &unique_markdown
+                            ).await;
+                        }
+                    }
+                }
+                model::SyncAction::UpToDate => {
+                    println!("➔ [NOTION-ID: {}]: Bereits auf dem neuesten Stand.", notion_id);
+                }
+            }
+        }
+        
+        println!(
+            "Abgeschlossene Synchronisation. Warte {} Sekunden bis zum nächsten Durchlauf...",
+            sync_interval.as_secs()
+        );
+        sleep(sync_interval).await;
+    }
 }
