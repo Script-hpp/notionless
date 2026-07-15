@@ -9,6 +9,7 @@ pub struct PaperlessDocument
 #[derive(Deserialize, Debug)]
 pub struct PaperlessResponse
 {
+    pub next : Option<String>,
     pub results: Vec<PaperlessDocument>,
 }
 
