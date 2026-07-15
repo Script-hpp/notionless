@@ -30,3 +30,11 @@ pub struct NotionPage {
     pub id: String,
     pub last_edited_time: String,
 }
+
+#[derive(Debug)]
+pub enum SyncAction {
+    UpdateNotion,       // Paperless ist neuer
+    UpdatePaperless,    // Notion ist neuer
+    CreateInPaperless,  // Existiert nur in Notion
+    UpToDate,           // Beide sind auf dem gleichen Stand
+}

@@ -1,6 +1,8 @@
 mod model;
+mod helpers;
 
 use model::{PaperlessResponse, NotionResponse};
+use helpers::{parse_paperless_date, parse_notion_date};
 use std::collections::HashMap;
 
 
@@ -38,7 +40,7 @@ async fn fetch_paperless_memory(
 
             current_url = response.next.map(|mut url| {
                 // very secure fix dont try it at home
-                if (url.starts_with("http://")) {
+                if url.starts_with("http://") {
                     url = url.replace("http://", "https://");
                 }
 
@@ -97,6 +99,28 @@ async fn main()-> Result<(), Box<dyn std::error::Error>> {
 
     println!("Paperless Memory: {:?}", paperless_map);
     println!("Notion Memory: {:?}", notion_map);
+
+    // 3. Abgleich berechnen
+    println!("\n--- Berechne Synchronisation ---");
+    let sync_actions = helpers::compare_memories(&paperless_map, &notion_map);
+
+    // 4. Ergebnisse ausgeben
+    for (notion_id, action) in &sync_actions {
+        match action {
+            model::SyncAction::CreateInPaperless => {
+                println!("➔ [NOTION-ID: {}]: Muss in Paperless erstellt werden.", notion_id);
+            }
+            model::SyncAction::UpdateNotion => {
+                println!("➔ [NOTION-ID: {}]: Notion-Eintrag veraltet. Update Notion!", notion_id);
+            }
+            model::SyncAction::UpdatePaperless => {
+                println!("➔ [NOTION-ID: {}]: Paperless-Eintrag veraltet. Update Paperless!", notion_id);
+            }
+            model::SyncAction::UpToDate => {
+                println!("➔ [NOTION-ID: {}]: Bereits auf dem neuesten Stand.", notion_id);
+            }
+        }
+    }
 
     Ok(())
 }
