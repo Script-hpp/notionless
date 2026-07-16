@@ -1,89 +1,97 @@
 # notionless
 
-Synchronisiert Seiten aus einer Notion-Datenbank als Markdown-Dokumente nach
-[Paperless-ngx](https://docs.paperless-ngx.com/) — damit deine Notizen im selben
-durchsuchbaren Archiv landen wie der Rest deiner Dokumente, statt in einem Cloud-Silo.
+Syncs pages from a Notion database as Markdown documents into
+[Paperless-ngx](https://docs.paperless-ngx.com/) — so your notes end up in the same
+searchable archive as the rest of your documents, instead of a cloud silo.
 
-Läuft als Daemon: alle fünf Minuten (konfigurierbar) ein Abgleich, geänderte Seiten
-werden in Paperless ersetzt, neue angelegt.
+Runs as a daemon: a sync every five minutes (configurable), changed pages are replaced
+in Paperless, new ones are created.
 
 ## Status
 
-Ehrlicher Stand, damit niemand Zeit verliert:
+Honest state, so nobody wastes time:
 
-- **Die Synchronisation ist einseitig: Notion → Paperless.** Erkennt der Sync, dass die
-  Paperless-Seite neuer ist, wird das derzeit nur geloggt, nicht zurückgeschrieben.
-- **Es werden nur `paragraph` und `heading_1..3` exportiert.** Listen, Code-Blöcke,
-  To-dos, Tabellen und verschachtelte Blöcke fehlen im Markdown noch. Bei Seiten, die
-  überwiegend daraus bestehen, landet entsprechend wenig in Paperless.
-- Getestet gegen Paperless-ngx mit Notion-API-Version `2022-06-28`.
+- **The sync is one-way: Notion → Paperless.** If the sync detects the Paperless side is
+  newer, that's currently only logged, not written back.
+- **Only `paragraph` and `heading_1..3` are exported.** Lists, code blocks, to-dos,
+  tables, and nested blocks are still missing from the Markdown. Pages that consist
+  mostly of those end up with very little content in Paperless.
+- Tested against Paperless-ngx with Notion API version `2022-06-28`.
 
-Beides steht auf der Roadmap. PRs sind willkommen.
+Both are on the roadmap. PRs welcome.
 
-## Wie Änderungen erkannt werden
+## How changes are detected
 
-Notion rundet `last_edited_time` auf Minuten, Zeitstempel allein sind also unzuverlässig.
-notionless bildet stattdessen einen **SHA-256 über das exportierte Markdown** und legt ihn
-am Paperless-Dokument ab. Gleicher Hash heißt: kein Upload, egal was die Zeitstempel sagen.
-Der Zeitstempel entscheidet nur noch über die *Richtung* einer Änderung.
+Notion rounds `last_edited_time` to the minute, so timestamps alone aren't reliable.
+notionless instead computes a **SHA-256 of the exported Markdown** and stores it on the
+Paperless document. Matching hashes mean: no upload, no matter what the timestamps say.
+The timestamp only decides the *direction* of a change.
 
-Zur Zuordnung schreibt notionless drei Custom-Fields an jedes Dokument:
+To keep the two sides linked, notionless writes three custom fields to every document:
 
-| Feld | Inhalt |
+| Field | Content |
 | --- | --- |
-| `notion_id` | Notion-Page-ID, der Anker zwischen beiden Systemen |
-| `notion_last_edited` | `last_edited_time` aus Notion |
-| `notion_content_hash` | SHA-256 des exportierten Markdowns |
+| `notion_id` | Notion page ID, the anchor between both systems |
+| `notion_last_edited` | `last_edited_time` from Notion |
+| `notion_content_hash` | SHA-256 of the exported Markdown |
 
-**Die Felder musst du nicht anlegen.** Beim Start löst notionless sie über ihre Namen auf
-und legt fehlende selbst an — die numerischen IDs sind pro Instanz verschieden und
-interessieren dich nicht.
+**You don't need to create these fields.** notionless resolves them by name at startup
+and creates any that are missing — the numeric IDs differ per instance and don't matter
+to you.
 
-**Liegt ein Dokument mit identischem Inhalt schon in Paperless** (z. B. weil du es vor
-notionless manuell importiert hast), lehnt Paperless den Upload als Duplikat ab. In dem
-Fall verknüpft notionless das vorhandene Dokument automatisch mit der Notion-Seite, statt
-es bei jedem Durchlauf erneut hochzuladen und erneut abgelehnt zu bekommen. Das ist sicher,
-weil Paperless' Duplikat-Erkennung selbst auf einem Byte-Hash der Datei basiert — die
-Adoption greift also nur, wenn der Inhalt nachweislich schon übereinstimmt.
+**If a document with identical content already exists in Paperless** (e.g. because you
+imported it manually before using notionless), Paperless rejects the upload as a
+duplicate. In that case notionless automatically links the existing document to the
+Notion page instead of re-uploading it — and getting rejected again — on every cycle.
+This is safe because Paperless' own duplicate detection is based on a byte hash of the
+file, so the adoption only kicks in once the content is already confirmed to match.
 
-## Einrichtung
+## Setup
 
-1. **Notion-Integration** unter https://www.notion.so/my-integrations anlegen, das
-   *Internal Integration Secret* kopieren und die Integration in der Datenbank unter
-   *Connections* freigeben. Ohne diesen Schritt liefert die API eine leere Liste.
-   Die Datenbank braucht eine Titel-Spalte namens `Name`.
-2. **Paperless-API-Token** unter *Einstellungen → Benutzer* erzeugen.
-3. **Konfigurieren:**
+1. **Create a Notion integration** at https://www.notion.so/my-integrations, copy the
+   *Internal Integration Secret*, and share the database with the integration under
+   *Connections*. Without this step the API returns an empty list. The database needs a
+   title column named `Name`.
+2. **Create a Paperless API token** under *Settings → Users*.
+3. **Configure:**
    ```sh
    cp .env.example .env
-   # .env ausfüllen
+   # fill in .env
    ```
-4. **Starten:**
+4. **Run:**
    ```sh
    cargo run --release
    ```
 
-Alle Einstellungen kommen aus Umgebungsvariablen, `.env` ist nur die bequeme lokale
-Variante — im Container reichen normale env-Variablen.
+All settings come from environment variables; `.env` is just the convenient local
+option — in a container, plain env vars are enough.
 
-## Konfiguration
+## Configuration
 
-| Variable | Pflicht | Bedeutung |
+| Variable | Required | Meaning |
 | --- | --- | --- |
-| `PAPERLESS_URL` | ja | Basis-URL der Paperless-Instanz, `http://` im LAN ist ok |
-| `PAPERLESS_TOKEN` | ja | Paperless-API-Token |
-| `NOTION_URL` | ja | `https://api.notion.com/v1/databases/<DATABASE_ID>/query` |
-| `NOTION_TOKEN` | ja | Notion Internal Integration Secret |
-| `SYNC_INTERVAL_SECS` | nein | Sekunden zwischen zwei Durchläufen (Standard: `300`) |
+| `PAPERLESS_URL` | yes | Base URL of the Paperless instance; `http://` on a LAN is fine |
+| `PAPERLESS_TOKEN` | yes | Paperless API token |
+| `NOTION_URL` | yes | `https://api.notion.com/v1/databases/<DATABASE_ID>/query` |
+| `NOTION_TOKEN` | yes | Notion Internal Integration Secret |
+| `SYNC_INTERVAL_SECS` | no | Seconds between sync cycles (default: `300`) |
 
-## Wichtig zu wissen
+## Important to know
 
-Wird eine Seite in Notion geändert, **löscht** notionless das alte Paperless-Dokument
-endgültig (inklusive Papierkorb — sonst greift Paperless' Duplikatsprüfung) und lädt die
-neue Fassung hoch. Zusammen mit der oben genannten Block-Einschränkung heißt das: Inhalte,
-die der Exporter nicht kennt, sind nach einem Update auch in Paperless weg. Wenn deine
-Paperless-Dokumente die einzige Kopie sind, halte ein Backup bereit.
+When a page changes in Notion, notionless **permanently deletes** the old Paperless
+document (trash included — otherwise Paperless' duplicate check gets in the way) and
+uploads the new version. Combined with the block limitation above, that means: content
+the exporter doesn't understand is gone from Paperless after an update too. If your
+Paperless documents are the only copy, keep a backup.
 
-## Lizenz
+## Project layout
 
-MIT — siehe [LICENSE](LICENSE).
+- `src/main.rs` — entry point: env config, startup, the sync loop.
+- `src/paperless.rs` + `src/paperless/model.rs` — everything that talks to Paperless.
+- `src/notion.rs` + `src/notion/model.rs` — everything that talks to Notion.
+- `src/sync.rs` — the diffing logic (what changed, in which direction) and one sync
+  cycle that ties Notion and Paperless together.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
