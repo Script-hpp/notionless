@@ -35,6 +35,14 @@ I'm building this because I'm starting a new degree soon and want to take notes 
 Notion without ending up with a second, unsearchable archive next to Paperless. This
 needs to work reliably before day one, not eventually.
 
+Subjects like maths and physics need actual handwriting, which I do in a separate
+tablet app, not Notion. Getting those pages (as PDFs or images) into Paperless too is
+on my list, but it's a separate problem from this repo's current scope: notionless only
+exports Notion's text blocks today, not file or image blocks, so handwritten pages
+routed through Notion would currently be silently dropped. Whether that becomes a
+Notion file-block exporter here, or a direct handwriting-app-to-Paperless path that
+skips Notion entirely, is still open; see [Status](#status).
+
 If you don't self-host anything, this project isn't for you. If you already run
 Paperless-ngx and want your Notion notes to show up in the same search, this is a
 five-minute setup, not a migration project.
@@ -49,9 +57,11 @@ Honest state, so nobody wastes time:
   tables, and nested blocks are still missing from the Markdown. Pages that consist
   mostly of those end up with very little content in Paperless.
 - Tested against Paperless-ngx with Notion API version `2022-06-28`.
+- **No file/image/PDF blocks.** Scanned or handwritten pages attached to a Notion page
+  aren't picked up at all right now.
 
-Both are on the roadmap. PRs welcome: this is a small, readable Rust codebase
-(see [Project layout](#project-layout)), not a framework to learn first.
+All of the above are on the roadmap. PRs welcome: this is a small, readable Rust
+codebase (see [Project layout](#project-layout)), not a framework to learn first.
 
 ## How changes are detected
 
