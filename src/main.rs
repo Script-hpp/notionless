@@ -324,6 +324,14 @@ async fn delete_from_paperless(
     Ok(())
 }
 
+/// Ergebnis eines abgewarteten Paperless-Tasks.
+enum TaskResult {
+    Success,
+    /// Task ist fehlgeschlagen; enthält Paperless' Klartext-Grund (z. B. Duplikat-Meldung).
+    Failure(String),
+    Timeout,
+}
+
 /// Paperless verarbeitet Uploads asynchron. `post_document` liefert nur eine Task-ID;
 /// ob das Dokument wirklich aufgenommen wurde (oder z. B. als Duplikat abgelehnt), steht
 /// erst danach im Task-Status. Wir pollen deshalb und loggen das echte Ergebnis IMMER.
@@ -333,7 +341,7 @@ async fn wait_for_task(
     token: &str,
     task_id: &str,
     title: &str
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<TaskResult, Box<dyn std::error::Error>> {
     let tasks_url = format!("{}/api/tasks/?task_id={}", base_domain, task_id);
 
     for _ in 0..10 {
@@ -349,15 +357,16 @@ async fn wait_for_task(
             match status {
                 "SUCCESS" => {
                     println!("  ✓ Paperless hat '{}' erfolgreich aufgenommen.", title);
-                    return Ok(());
+                    return Ok(TaskResult::Success);
                 }
                 "FAILURE" => {
                     let result = task
                         .get("result")
                         .and_then(|r| r.as_str())
-                        .unwrap_or("(kein Grund angegeben)");
+                        .unwrap_or("(kein Grund angegeben)")
+                        .to_string();
                     println!("  ✗ Paperless hat '{}' ABGELEHNT (Task {}): {}", title, task_id, result);
-                    return Ok(());
+                    return Ok(TaskResult::Failure(result));
                 }
                 _ => {} // PENDING / STARTED / RECEIVED -> weiter warten
             }
@@ -367,6 +376,72 @@ async fn wait_for_task(
     }
 
     println!("  ⚠ Task {} für '{}' nicht rechtzeitig abgeschlossen (Timeout beim Warten).", task_id, title);
+    Ok(TaskResult::Timeout)
+}
+
+/// Zieht die Paperless-Dokument-ID aus einer Duplikat-Fehlermeldung, z. B.
+/// "It is a duplicate of moin moin (#327)." -> Some(327).
+fn parse_duplicate_document_id(message: &str) -> Option<i64> {
+    let start = message.rfind("(#")? + 2;
+    let end = start + message[start..].find(')')?;
+    message[start..end].trim().parse().ok()
+}
+
+/// Verknüpft ein bereits in Paperless vorhandenes Dokument nachträglich mit einer
+/// Notion-Seite. Greift, wenn `post_document` das Dokument als Duplikat ablehnt, weil
+/// es (z. B. aus einer Zeit vor notionless oder nach einer Feld-Migration) schon ohne
+/// Notion-Zuordnung existiert. Ohne das würde der Sync es bei jedem Durchlauf erneut
+/// hochladen und erneut als Duplikat abgelehnt bekommen — eine Endlosschleife.
+///
+/// Bestehende Custom-Fields werden gelesen und übernommen, statt überschrieben: Paperless'
+/// PATCH ersetzt die komplette custom_fields-Liste, ein reines `{"custom_fields": [...]}`
+/// mit nur unseren drei Feldern würde sonst andere, manuell gepflegte Felder löschen.
+async fn adopt_existing_document(
+    client: &reqwest::Client,
+    base_domain: &str,
+    token: &str,
+    document_id: i64,
+    fields: &FieldIds,
+    notion_id: &str,
+    last_edited_time: &str,
+    content_hash: &str
+) -> Result<(), Box<dyn std::error::Error>> {
+    let document_url = format!("{}/api/documents/{}/", base_domain, document_id);
+
+    let existing = client
+        .get(&document_url)
+        .header("Authorization", format!("Token {}", token))
+        .header("Accept", "application/json")
+        .send().await?
+        .json::<model::PaperlessDocument>().await?;
+
+    let our_field_ids = [fields.notion_id, fields.last_edited, fields.content_hash];
+    let mut merged: Vec<serde_json::Value> = existing.custom_fields
+        .into_iter()
+        .filter(|cf| !our_field_ids.contains(&cf.field))
+        .map(|cf| serde_json::json!({ "field": cf.field, "value": cf.value }))
+        .collect();
+    merged.push(serde_json::json!({ "field": fields.notion_id, "value": notion_id }));
+    merged.push(serde_json::json!({ "field": fields.last_edited, "value": last_edited_time }));
+    merged.push(serde_json::json!({ "field": fields.content_hash, "value": content_hash }));
+
+    let response = client
+        .patch(&document_url)
+        .header("Authorization", format!("Token {}", token))
+        .header("Accept", "application/json")
+        .header("Referer", &document_url)
+        .header("Origin", base_domain)
+        .json(&serde_json::json!({ "custom_fields": merged }))
+        .send().await?;
+
+    if response.status().is_success() {
+        println!("  ✓ Vorhandenes Dokument (ID: {}) mit Notion-Seite verknüpft.", document_id);
+    } else {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        println!("  ✗ Verknüpfung von Dokument {} fehlgeschlagen (Status {}): {}", document_id, status, text);
+    }
+
     Ok(())
 }
 
@@ -420,7 +495,21 @@ async fn upload_to_paperless(
             println!("  ⚠ Upload von '{}' angenommen, aber keine Task-ID erhalten.", title);
         } else {
             println!("  … Upload von '{}' angenommen (Task {}). Warte auf Verarbeitung…", title, task_id);
-            let _ = wait_for_task(client, &base_domain, clean_token, &task_id, title).await;
+            if let Ok(TaskResult::Failure(message)) = wait_for_task(client, &base_domain, clean_token, &task_id, title).await {
+                if let Some(document_id) = parse_duplicate_document_id(&message) {
+                    println!("  ↻ '{}' liegt inhaltsgleich bereits in Paperless (ID: {}). Verknüpfe...", title, document_id);
+                    let _ = adopt_existing_document(
+                        client,
+                        &base_domain,
+                        clean_token,
+                        document_id,
+                        fields,
+                        notion_id,
+                        last_edited_time,
+                        content_hash
+                    ).await;
+                }
+            }
         }
     } else {
         let status = response.status();
@@ -532,7 +621,22 @@ async fn run_sync_cycle(
 
 #[cfg(test)]
 mod tests {
-    use super::{ base_domain, normalize_next_url };
+    use super::{ base_domain, normalize_next_url, parse_duplicate_document_id };
+
+    #[test]
+    fn duplicate_id_wird_aus_paperless_fehlermeldung_geparst() {
+        assert_eq!(
+            parse_duplicate_document_id(
+                "moin moin.md: Not consuming moin moin.md: It is a duplicate of moin moin (#327)."
+            ),
+            Some(327)
+        );
+    }
+
+    #[test]
+    fn andere_fehlermeldungen_liefern_keine_id() {
+        assert_eq!(parse_duplicate_document_id("Timeout beim Verbindungsaufbau"), None);
+    }
 
     #[test]
     fn next_url_uebernimmt_schema_der_konfiguration() {

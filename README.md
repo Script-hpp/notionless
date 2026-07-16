@@ -39,6 +39,13 @@ Zur Zuordnung schreibt notionless drei Custom-Fields an jedes Dokument:
 und legt fehlende selbst an — die numerischen IDs sind pro Instanz verschieden und
 interessieren dich nicht.
 
+**Liegt ein Dokument mit identischem Inhalt schon in Paperless** (z. B. weil du es vor
+notionless manuell importiert hast), lehnt Paperless den Upload als Duplikat ab. In dem
+Fall verknüpft notionless das vorhandene Dokument automatisch mit der Notion-Seite, statt
+es bei jedem Durchlauf erneut hochzuladen und erneut abgelehnt zu bekommen. Das ist sicher,
+weil Paperless' Duplikat-Erkennung selbst auf einem Byte-Hash der Datei basiert — die
+Adoption greift also nur, wenn der Inhalt nachweislich schon übereinstimmt.
+
 ## Einrichtung
 
 1. **Notion-Integration** unter https://www.notion.so/my-integrations anlegen, das
