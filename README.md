@@ -125,14 +125,17 @@ docker build -t notionless .
 docker run --rm --env-file .env notionless
 ```
 
-If Paperless already runs in its own docker-compose stack, join that network instead
-of exposing it: `docker-compose.yml` in this repo shows the pattern (`networks:
-paperless: external: true`, name adjusted to your Paperless stack's network, found via
-`docker network ls`), then:
+Or with `docker-compose.yml`:
 
 ```sh
 docker compose up -d --build
 ```
+
+The default `docker-compose.yml` runs standalone, which is right if `PAPERLESS_URL`
+is a normal `https://` address (Paperless running on another server, or exposed
+through a reverse proxy). If Paperless instead runs in its own docker-compose stack
+on the *same* host and `PAPERLESS_URL` points at its internal container name, join
+that stack's network instead; see the commented-out example in `docker-compose.yml`.
 
 ## Configuration
 

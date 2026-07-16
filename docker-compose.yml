@@ -4,12 +4,23 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    networks:
-      - paperless
 
-networks:
-  paperless:
-    external: true
-    # Name of the network your paperless-ngx docker-compose stack already runs on.
-    # Find it with `docker network ls`; it's usually <paperless-project-dir>_default.
-    name: paperless-ngx_default
+# If Paperless runs in its own docker-compose stack on this same host, and
+# PAPERLESS_URL points at its internal container name/port rather than a public
+# URL, join that stack's network instead of the default bridge network:
+#
+#   services:
+#     notionless:
+#       ...
+#       networks:
+#         - paperless
+#
+#   networks:
+#     paperless:
+#       external: true
+#       # Name of your paperless-ngx stack's network. Find it with `docker network
+#       # ls`; it's usually <paperless-project-dir>_default.
+#       name: paperless-ngx_default
+#
+# If PAPERLESS_URL is a public https:// address (e.g. Paperless runs on a
+# different server), the plain version above is all you need.
