@@ -1,0 +1,15 @@
+services:
+  notionless:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    networks:
+      - paperless
+
+networks:
+  paperless:
+    external: true
+    # Name of the network your paperless-ngx docker-compose stack already runs on.
+    # Find it with `docker network ls`; it's usually <paperless-project-dir>_default.
+    name: paperless-ngx_default
