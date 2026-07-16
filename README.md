@@ -26,6 +26,10 @@ Notion is a great place to *write*. It's a bad place to *keep* things:
 - If you're already running Paperless for the rest of your paperwork, your notes are
   the one category that's still siloed off.
 
+I'm building this because I'm starting a new degree soon and want to take notes in
+Notion without ending up with a second, unsearchable archive next to Paperless. This
+needs to work reliably before day one, not eventually.
+
 If you don't self-host anything, this project isn't for you. If you already run
 Paperless-ngx and want your Notion notes to show up in the same search, this is a
 five-minute setup, not a migration project.
