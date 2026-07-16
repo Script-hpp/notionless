@@ -21,6 +21,21 @@ changed get re-uploaded, and it's built to survive being pointed at a Paperless 
 that already has your documents in it, see [duplicate handling](#how-changes-are-detected)
 below.
 
+## See it in action
+
+A page edited in Notion:
+
+<img src="assets/notion.png" width="600" alt="A Notion page being edited">
+
+notionless picks up the change on the next cycle and re-syncs it:
+
+<img src="assets/terminal.png" width="600" alt="notionless syncing the change in a terminal">
+
+...and the Paperless document is updated, tagged with the custom fields that keep it
+linked to the Notion page:
+
+<img src="assets/paperless.png" width="600" alt="The resulting document in Paperless, with notion_id, notion_last_edited and notion_content_hash custom fields">
+
 ## Why this exists
 
 Notion is a great place to *write*. It's a bad place to *keep* things:
