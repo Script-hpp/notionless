@@ -1,11 +1,34 @@
 # notionless
 
-Syncs pages from a Notion database as Markdown documents into
-[Paperless-ngx](https://docs.paperless-ngx.com/) — so your notes end up in the same
-searchable archive as the rest of your documents, instead of a cloud silo.
+Your Notion notes are stuck in Notion. Everything else you own — invoices, contracts,
+scanned mail, manuals — probably already lives in [Paperless-ngx](https://docs.paperless-ngx.com/),
+full-text searchable, tagged, backed up, self-hosted. Your notes are the one thing that
+isn't in there. Search your archive for something and Notion just doesn't show up,
+because it's a different app on a different server you don't control.
 
-Runs as a daemon: a sync every five minutes (configurable), changed pages are replaced
-in Paperless, new ones are created.
+notionless closes that gap: it runs as a small daemon, watches a Notion database, and
+mirrors every page into Paperless as a Markdown document — automatically, on a
+schedule, with no manual export. Once it's running, "search everything I own" actually
+means everything, notes included.
+
+It's not a one-off export script. It diffs on every cycle, so only pages that actually
+changed get re-uploaded, and it's built to survive being pointed at a Paperless instance
+that already has your documents in it — see [duplicate handling](#how-changes-are-detected)
+below.
+
+## Why this exists
+
+Notion is a great place to *write*. It's a bad place to *keep* things:
+
+- No real full-text search across notes and everything else you've archived.
+- Your notes live behind Notion's uptime, Notion's pricing, and Notion's export
+  formats — not yours.
+- If you're already running Paperless for the rest of your paperwork, your notes are
+  the one category that's still siloed off.
+
+If you don't self-host anything, this project isn't for you. If you already run
+Paperless-ngx and want your Notion notes to show up in the same search, this is a
+five-minute setup, not a migration project.
 
 ## Status
 
@@ -18,7 +41,8 @@ Honest state, so nobody wastes time:
   mostly of those end up with very little content in Paperless.
 - Tested against Paperless-ngx with Notion API version `2022-06-28`.
 
-Both are on the roadmap. PRs welcome.
+Both are on the roadmap. PRs welcome — this is a small, readable Rust codebase
+(see [Project layout](#project-layout)), not a framework to learn first.
 
 ## How changes are detected
 
@@ -45,6 +69,8 @@ duplicate. In that case notionless automatically links the existing document to 
 Notion page instead of re-uploading it — and getting rejected again — on every cycle.
 This is safe because Paperless' own duplicate detection is based on a byte hash of the
 file, so the adoption only kicks in once the content is already confirmed to match.
+In other words: you can point notionless at a Paperless instance you already use, and
+it adopts what's already there instead of fighting it.
 
 ## Setup
 
