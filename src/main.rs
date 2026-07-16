@@ -1,22 +1,106 @@
 mod model;
 mod helpers;
 
-use model::{ PaperlessResponse, NotionResponse };
+use model::{ PaperlessResponse, NotionResponse, FieldIds };
 use std::time::Duration;
 use tokio::time::sleep;
 use std::collections::HashMap;
 use reqwest::multipart;
 
-// Paperless Custom-Field-IDs. Field 5 muss in Paperless als Textfeld angelegt sein
-// und speichert den SHA-256 des zuletzt hochgeladenen Notion-Inhalts.
-const FIELD_NOTION_ID: i64 = 1;
-const FIELD_LAST_EDITED: i64 = 4;
-const FIELD_CONTENT_HASH: i64 = 5;
+// Namen der Custom-Fields in Paperless. Die numerischen IDs unterscheiden sich pro
+// Instanz und werden beim Start über diese Namen aufgelöst (siehe `ensure_custom_fields`).
+const FIELD_NAME_NOTION_ID: &str = "notion_id";
+const FIELD_NAME_LAST_EDITED: &str = "notion_last_edited";
+const FIELD_NAME_CONTENT_HASH: &str = "notion_content_hash";
+
+/// Schneidet einen Pfad-Anteil (z. B. `/api/documents/`) von der konfigurierten URL ab,
+/// sodass die Basis der Paperless-Instanz übrig bleibt. Schema und Port bleiben unangetastet.
+fn base_domain(paperless_url: &str) -> String {
+    let clean = paperless_url.trim().trim_end_matches('/');
+    clean.split("/api").next().unwrap_or(clean).trim_end_matches('/').to_string()
+}
+
+/// Löst die Custom-Field-IDs dieser Paperless-Instanz über ihre Namen auf und legt
+/// fehlende Felder an. Damit läuft der Sync ohne manuelle Konfiguration gegen eine
+/// beliebige Instanz.
+async fn ensure_custom_fields(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str
+) -> Result<FieldIds, Box<dyn std::error::Error>> {
+    let mut existing: HashMap<String, i64> = HashMap::new();
+    let mut current_url: Option<String> = Some(format!("{}/api/custom_fields/?page_size=100", base));
+
+    while let Some(url) = current_url {
+        let response = client
+            .get(&url)
+            .header("Authorization", format!("Token {}", token))
+            .header("Accept", "application/json")
+            .send().await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(
+                format!("Custom-Fields konnten nicht gelesen werden (Status {}): {}", status, text).into()
+            );
+        }
+
+        let page = response.json::<model::CustomFieldListResponse>().await?;
+        for field in page.results {
+            existing.insert(field.name, field.id);
+        }
+        current_url = page.next;
+    }
+
+    Ok(FieldIds {
+        notion_id: get_or_create_field(client, base, token, &existing, FIELD_NAME_NOTION_ID).await?,
+        last_edited: get_or_create_field(client, base, token, &existing, FIELD_NAME_LAST_EDITED).await?,
+        content_hash: get_or_create_field(client, base, token, &existing, FIELD_NAME_CONTENT_HASH).await?,
+    })
+}
+
+async fn get_or_create_field(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    existing: &HashMap<String, i64>,
+    name: &str
+) -> Result<i64, Box<dyn std::error::Error>> {
+    if let Some(id) = existing.get(name) {
+        println!("  ✓ Custom-Field '{}' gefunden (ID {}).", name, id);
+        return Ok(*id);
+    }
+
+    let create_url = format!("{}/api/custom_fields/", base);
+    let body = serde_json::json!({ "name": name, "data_type": "string" });
+    let response = client
+        .post(&create_url)
+        .header("Authorization", format!("Token {}", token))
+        .header("Accept", "application/json")
+        .header("Referer", &create_url)
+        .header("Origin", base)
+        .json(&body)
+        .send().await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(
+            format!("Custom-Field '{}' konnte nicht angelegt werden (Status {}): {}", name, status, text).into()
+        );
+    }
+
+    let field = response.json::<model::CustomFieldDefinition>().await?;
+    println!("  + Custom-Field '{}' in Paperless angelegt (ID {}).", name, field.id);
+    Ok(field.id)
+}
 
 async fn fetch_paperless_memory(
     client: &reqwest::Client,
     start_url: &str,
-    token: &str
+    token: &str,
+    fields: &FieldIds
 ) -> Result<HashMap<String, (i64, String, String)>, Box<dyn std::error::Error>> {
     // notion_id -> (paperless_id, last_edited_time, content_hash)
     let mut paperless_map: HashMap<String, (i64, String, String)> = HashMap::new();
@@ -33,11 +117,11 @@ async fn fetch_paperless_memory(
             let mut notion_last_edited: Option<String> = None;
             let mut content_hash: Option<String> = None;
             for custom_field in doc.custom_fields {
-                if custom_field.field == FIELD_NOTION_ID {
+                if custom_field.field == fields.notion_id {
                     notion_id = custom_field.value;
-                } else if custom_field.field == FIELD_LAST_EDITED {
+                } else if custom_field.field == fields.last_edited {
                     notion_last_edited = custom_field.value;
-                } else if custom_field.field == FIELD_CONTENT_HASH {
+                } else if custom_field.field == fields.content_hash {
                     content_hash = custom_field.value;
                 }
             }
@@ -49,11 +133,9 @@ async fn fetch_paperless_memory(
         }
 
         current_url = response.next.map(|mut url| {
-            // very secure fix dont try it at home
-            if url.starts_with("http://") {
-                url = url.replace("http://", "https://");
-            }
-
+            // Paperless liefert die `next`-URL je nach Reverse-Proxy-Setup ohne
+            // abschließenden Slash vor dem Query-String zurück; das ergänzen wir.
+            // Das Schema bleibt unangetastet: http:// ist bei LAN-Instanzen normal.
             if let Some(query_idx) = url.find('?') {
                 let base = &url[..query_idx];
                 if !base.ends_with('/') {
@@ -172,16 +254,8 @@ async fn delete_from_paperless(
     token: &str,
     document_id: i64
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let clean_url = paperless_url.trim().trim_end_matches('/');
     let clean_token = token.trim();
-
-    let secure_url = if clean_url.starts_with("http://") {
-        clean_url.replace("http://", "https://")
-    } else {
-        clean_url.to_string()
-    };
-
-    let base_domain = secure_url.split("/api").next().unwrap_or(&secure_url);
+    let base_domain = base_domain(paperless_url);
     let delete_url = format!("{}/api/documents/{}/", base_domain, document_id);
 
     let response = client
@@ -189,7 +263,7 @@ async fn delete_from_paperless(
         .header("Authorization", format!("Token {}", clean_token))
         .header("Accept", "application/json")
         .header("Referer", &delete_url)
-        .header("Origin", &secure_url)
+        .header("Origin", &base_domain)
         .send().await?;
 
     if response.status().is_success() || response.status() == 204 {
@@ -281,19 +355,11 @@ async fn upload_to_paperless(
     last_edited_time: &str,
     title: &str,
     content_hash: &str,
-    markdown_content: &str
+    markdown_content: &str,
+    fields: &FieldIds
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let clean_url = paperless_url.trim().trim_end_matches('/');
     let clean_token = token.trim();
-
-    let secure_url = if clean_url.starts_with("http://") {
-        clean_url.replace("http://", "https://")
-    } else {
-        clean_url.to_string()
-    };
-
-    let base_domain = secure_url.split("/api").next().unwrap_or(&secure_url);
-
+    let base_domain = base_domain(paperless_url);
     let upload_url = format!("{}/api/documents/post_document/", base_domain);
 
     let file_part = multipart::Part
@@ -301,13 +367,12 @@ async fn upload_to_paperless(
         .file_name(format!("{}.md", title))
         .mime_str("text/markdown")?;
 
-    // Feld 1 = Notion-ID, Feld 4 = last_edited_time, Feld 5 = SHA-256 des Inhalts
-    let custom_fields_json = format!(
-        "{{\"{}\": \"{}\", \"{}\": \"{}\", \"{}\": \"{}\"}}",
-        FIELD_NOTION_ID, notion_id,
-        FIELD_LAST_EDITED, last_edited_time,
-        FIELD_CONTENT_HASH, content_hash
-    );
+    // Die Feld-IDs stammen aus der Discovery beim Start und gelten für diese Instanz.
+    let custom_fields_json = serde_json::json!({
+        fields.notion_id.to_string(): notion_id,
+        fields.last_edited.to_string(): last_edited_time,
+        fields.content_hash.to_string(): content_hash,
+    }).to_string();
     let form = multipart::Form
         ::new()
         .part("document", file_part)
@@ -319,7 +384,7 @@ async fn upload_to_paperless(
         .header("Authorization", format!("Token {}", clean_token))
         .header("Accept", "application/json")
         .header("Referer", &upload_url)
-        .header("Origin", &secure_url)
+        .header("Origin", &base_domain)
         .multipart(form)
         .send().await?;
 
@@ -332,7 +397,7 @@ async fn upload_to_paperless(
             println!("  ⚠ Upload von '{}' angenommen, aber keine Task-ID erhalten.", title);
         } else {
             println!("  … Upload von '{}' angenommen (Task {}). Warte auf Verarbeitung…", title, task_id);
-            let _ = wait_for_task(client, base_domain, clean_token, &task_id, title).await;
+            let _ = wait_for_task(client, &base_domain, clean_token, &task_id, title).await;
         }
     } else {
         let status = response.status();
@@ -353,11 +418,12 @@ async fn run_sync_cycle(
     paperless_url: &str,
     paperless_token: &str,
     notion_url: &str,
-    notion_token: &str
+    notion_token: &str,
+    fields: &FieldIds
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 1. WICHTIG: Daten in JEDEM Durchlauf neu abfragen!
     let notion_map = fetch_notion_memory(client, notion_url, notion_token).await?;
-    let paperless_map = fetch_paperless_memory(client, paperless_url, paperless_token).await?;
+    let paperless_map = fetch_paperless_memory(client, paperless_url, paperless_token, fields).await?;
 
     // 2. Inhalte EINMAL exportieren, Markdown cachen und Hashes berechnen.
     //    Der Hash ist die maßgebliche Änderungserkennung (nicht der Zeitstempel).
@@ -378,13 +444,6 @@ async fn run_sync_cycle(
         }
     }
 
-    if let Some((_, _, notion_hash)) = notion_full.get("39ea261e-0fc5-80e0-94df-d09d18774342") {
-        println!("  [DEBUG] Hash laut Notion:    {}", notion_hash);
-    }
-    if let Some((_, _, paperless_hash)) = paperless_map.get("39ea261e-0fc5-80e0-94df-d09d18774342") {
-        println!("  [DEBUG] Hash laut Paperless: {}", paperless_hash);
-    }
-
     // 3. WICHTIG: Aktionen mit den frischen Daten neu berechnen!
     let sync_actions = helpers::compare_memories(&paperless_map, &notion_full);
 
@@ -403,7 +462,8 @@ async fn run_sync_cycle(
                         last_edited_time,
                         title,
                         hash,
-                        markdown
+                        markdown,
+                        fields
                     ).await;
                 }
             }
@@ -432,7 +492,8 @@ async fn run_sync_cycle(
                             last_edited_time,
                             title,
                             hash,
-                            &unique_markdown
+                            &unique_markdown,
+                            fields
                         ).await;
                     }
                 }
@@ -461,7 +522,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let notion_url = std::env::var("NOTION_URL").expect("NOTION_URL must be set");
     let notion_token = std::env::var("NOTION_TOKEN").expect("NOTION_TOKEN must be set");
 
-    let sync_interval = Duration::from_secs(300); // 5 Minuten
+    let sync_interval = Duration::from_secs(
+        std::env::var("SYNC_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(300)
+    );
+
+    // Feld-IDs einmalig auflösen: sie sind pro Paperless-Instanz verschieden.
+    // Schlägt das fehl, ist die Konfiguration kaputt -> lieber sofort abbrechen,
+    // als in jedem Durchlauf ins Leere zu synchronisieren.
+    println!("Prüfe Paperless Custom-Fields…");
+    let fields = ensure_custom_fields(
+        &client,
+        &base_domain(&paperless_url),
+        paperless_token.trim()
+    ).await?;
 
     // ==================================================
     // DER REAKTIVE ZYKLUS (Hier beginnt die Schleife)
@@ -476,7 +552,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &paperless_url,
             &paperless_token,
             &notion_url,
-            &notion_token
+            &notion_token,
+            &fields
         ).await {
             println!("  ✗ Synchronisation fehlgeschlagen: {}", e);
         }

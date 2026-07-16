@@ -21,6 +21,31 @@ pub struct CustomFields
     pub value: Option<String>,
 }
 
+/// Eine in Paperless angelegte Custom-Field-Definition. Die IDs sind pro Instanz
+/// verschieden, deshalb wird beim Start über den `name` aufgelöst.
+#[derive(Deserialize, Debug)]
+pub struct CustomFieldDefinition
+{
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct CustomFieldListResponse
+{
+    pub next: Option<String>,
+    pub results: Vec<CustomFieldDefinition>,
+}
+
+/// Die zur Laufzeit aufgelösten Feld-IDs dieser Paperless-Instanz.
+#[derive(Debug, Clone, Copy)]
+pub struct FieldIds
+{
+    pub notion_id: i64,
+    pub last_edited: i64,
+    pub content_hash: i64,
+}
+
 #[derive(Deserialize, Debug)]
 pub struct NotionResponse {
     pub results: Vec<NotionPage>,

@@ -5,15 +5,9 @@ edition = "2024"
 
 [dependencies]
 tokio = {version = "1.52.3", features = ["full"]}
-oauth2 = { version = "4.4", features = ["reqwest"] }
-webbrowser = "1.2.1"
-axum = "0.8.9"
-url = "2.5.8"
 serde = { version = "1.0.228", features = ["derive"] }
 reqwest = { version = "0.13.4", features = ["json", "multipart"] }
 dotenvy = "0.15.7"
 serde_json = "1.0.150"
-genpdf = "0.2.0"
-printpdf = "0.11.1"
 chrono = { version = "0.4.45", features = ["serde"] }
 sha2 = "0.10.8"
