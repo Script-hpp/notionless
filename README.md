@@ -130,8 +130,17 @@ it adopts what's already there instead of fighting it.
    cargo run --release
    ```
 
-All settings come from environment variables; `.env` is just the convenient local
-option, in a container plain env vars are enough.
+All settings come from environment variables. notionless looks for a `.env` file in two
+places, first one found wins:
+
+1. `~/.config/notionless/.env` (or `$XDG_CONFIG_HOME/notionless/.env`), the right place
+   if you installed the binary somewhere like `/usr/local/bin` or run it as a systemd
+   service.
+2. `.env` in the current directory, convenient for `cargo run` or when running from the
+   repo checkout directly.
+
+If neither exists, plain environment variables already set in the process (e.g. via
+Docker's `--env-file` or a systemd `Environment=`) are used as-is.
 
 ### Running with Docker
 

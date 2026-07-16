@@ -5,9 +5,36 @@ mod sync;
 use std::time::Duration;
 use tokio::time::sleep;
 
+/// Resolves `$XDG_CONFIG_HOME`, falling back to `~/.config` per XDG convention.
+fn xdg_config_dir() -> Option<std::path::PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
+        && !xdg.is_empty()
+    {
+        return Some(std::path::PathBuf::from(xdg));
+    }
+    std::env::var("HOME").ok().map(|home| std::path::PathBuf::from(home).join(".config"))
+}
+
+/// Loads config from `~/.config/notionless/.env` if present, otherwise from `.env` in
+/// the current directory.
+///
+/// Deliberately not using `dotenvy::dotenv()` here: it walks up parent directories
+/// looking for a `.env`, which is convenient inside this repo but a footgun for an
+/// installed binary (a systemd service or a copy in `/usr/local/bin`) that could
+/// silently pick up an unrelated `.env` from some ancestor directory instead of
+/// failing cleanly.
+fn load_config() {
+    if let Some(path) = xdg_config_dir().map(|dir| dir.join("notionless").join(".env"))
+        && dotenvy::from_path(&path).is_ok()
+    {
+        return;
+    }
+    let _ = dotenvy::from_filename(".env");
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    dotenvy::dotenv().ok();
+    load_config();
     println!("Sync engine is running!");
 
     // Timeout so a hanging request doesn't block the whole service.
