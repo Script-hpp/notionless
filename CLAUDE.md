@@ -53,9 +53,12 @@ in the first place.
 
 ## Testing
 
-Unit tests live in `#[cfg(test)] mod tests` at the bottom of the file they test
-(see `src/paperless.rs`). They cover pure logic (URL rewriting, error-message parsing),
-nothing that requires a live Paperless/Notion instance.
+Unit tests live in their own file, next to the module they test, wired in with
+`#[cfg(test)] #[path = "..."] mod tests;` (see the bottom of `src/paperless.rs` and
+`src/paperless/tests.rs`). Keeps test code out of the production file while still
+letting tests reach private items via `use super::*`. They cover pure logic (URL
+rewriting, error-message parsing), nothing that requires a live Paperless/Notion
+instance.
 
 Before trusting a behavioral fix (not just a compile fix), verify it against a real
 Paperless instance if one is available in the session, not just `cargo build`/
