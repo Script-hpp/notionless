@@ -1,7 +1,9 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
-  <img src="assets/logo-light.svg" alt="notionless" width="310">
-</picture>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <img src="assets/logo-light.svg" alt="notionless" width="310">
+  </picture>
+</p>
 
 Your Notion notes are stuck in Notion. Everything else you own (invoices, contracts,
 scanned mail, manuals) probably already lives in [Paperless-ngx](https://docs.paperless-ngx.com/),
@@ -106,6 +108,22 @@ it adopts what's already there instead of fighting it.
 All settings come from environment variables; `.env` is just the convenient local
 option, in a container plain env vars are enough.
 
+### Running with Docker
+
+```sh
+docker build -t notionless .
+docker run --rm --env-file .env notionless
+```
+
+If Paperless already runs in its own docker-compose stack, join that network instead
+of exposing it: `docker-compose.yml` in this repo shows the pattern (`networks:
+paperless: external: true`, name adjusted to your Paperless stack's network, found via
+`docker network ls`), then:
+
+```sh
+docker compose up -d --build
+```
+
 ## Configuration
 
 | Variable | Required | Meaning |
@@ -127,7 +145,8 @@ Paperless documents are the only copy, keep a backup.
 ## Project layout
 
 - `src/main.rs`: entry point, env config, startup, the sync loop.
-- `src/paperless.rs` + `src/paperless/model.rs`: everything that talks to Paperless.
+- `src/paperless.rs` + `src/paperless/model.rs` + `src/paperless/tests.rs`: everything
+  that talks to Paperless.
 - `src/notion.rs` + `src/notion/model.rs`: everything that talks to Notion.
 - `src/sync.rs`: the diffing logic (what changed, in which direction) and one sync
   cycle that ties Notion and Paperless together.
