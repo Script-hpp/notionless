@@ -20,6 +20,41 @@ fn base_domain(paperless_url: &str) -> String {
     clean.split("/api").next().unwrap_or(clean).trim_end_matches('/').to_string()
 }
 
+/// Baut die `next`-URL der Paperless-Pagination auf die konfigurierte Basis um.
+///
+/// Paperless bildet `next` aus dem, was es für seinen eigenen Host hält. Hinter einem
+/// Reverse-Proxy ohne `X-Forwarded-Proto` ist das `http://`, obwohl die Instanz unter
+/// `https://` läuft. Folgt man dem, verwirft reqwest beim Redirect auf https den
+/// Authorization-Header (Schema-Wechsel = fremder Origin) und Paperless antwortet 401.
+///
+/// Deshalb übernehmen wir nur Pfad + Query und hängen sie an die konfigurierte Basis:
+/// eine LAN-Instanz bleibt so http, eine Proxy-Instanz https.
+fn normalize_next_url(next: &str, base: &str) -> String {
+    let path_and_query = match next.find("://") {
+        Some(scheme_end) => {
+            let after_scheme = &next[scheme_end + 3..];
+            match after_scheme.find('/') {
+                Some(path_start) => &after_scheme[path_start..],
+                None => "/",
+            }
+        }
+        None => next,
+    };
+
+    let mut url = format!("{}{}", base, path_and_query);
+
+    // Manche Setups liefern den Pfad ohne abschließenden Slash vor dem Query-String.
+    if let Some(query_idx) = url.find('?') {
+        if !url[..query_idx].ends_with('/') {
+            url.insert(query_idx, '/');
+        }
+    } else if !url.ends_with('/') {
+        url.push('/');
+    }
+
+    url
+}
+
 /// Löst die Custom-Field-IDs dieser Paperless-Instanz über ihre Namen auf und legt
 /// fehlende Felder an. Damit läuft der Sync ohne manuelle Konfiguration gegen eine
 /// beliebige Instanz.
@@ -50,7 +85,7 @@ async fn ensure_custom_fields(
         for field in page.results {
             existing.insert(field.name, field.id);
         }
-        current_url = page.next;
+        current_url = page.next.map(|next| normalize_next_url(&next, base));
     }
 
     Ok(FieldIds {
@@ -104,6 +139,7 @@ async fn fetch_paperless_memory(
 ) -> Result<HashMap<String, (i64, String, String)>, Box<dyn std::error::Error>> {
     // notion_id -> (paperless_id, last_edited_time, content_hash)
     let mut paperless_map: HashMap<String, (i64, String, String)> = HashMap::new();
+    let base = base_domain(start_url);
     let mut current_url: Option<String> = Some(start_url.to_string());
 
     while let Some(url) = current_url {
@@ -132,20 +168,7 @@ async fn fetch_paperless_memory(
             }
         }
 
-        current_url = response.next.map(|mut url| {
-            // Paperless liefert die `next`-URL je nach Reverse-Proxy-Setup ohne
-            // abschließenden Slash vor dem Query-String zurück; das ergänzen wir.
-            // Das Schema bleibt unangetastet: http:// ist bei LAN-Instanzen normal.
-            if let Some(query_idx) = url.find('?') {
-                let base = &url[..query_idx];
-                if !base.ends_with('/') {
-                    url.insert(query_idx, '/');
-                }
-            } else if !url.ends_with('/') {
-                url.push('/');
-            }
-            url
-        });
+        current_url = response.next.map(|next| normalize_next_url(&next, &base));
     }
 
     Ok(paperless_map)
@@ -505,6 +528,49 @@ async fn run_sync_cycle(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ base_domain, normalize_next_url };
+
+    #[test]
+    fn next_url_uebernimmt_schema_der_konfiguration() {
+        // Der Fall aus der Praxis: Paperless hinter einem Proxy ohne X-Forwarded-Proto
+        // gibt http:// zurück, obwohl die Instanz unter https:// erreichbar ist.
+        assert_eq!(
+            normalize_next_url(
+                "http://paperless.example.dev/api/documents/?page=2&page_size=100",
+                "https://paperless.example.dev"
+            ),
+            "https://paperless.example.dev/api/documents/?page=2&page_size=100"
+        );
+    }
+
+    #[test]
+    fn lan_instanz_bleibt_http_mit_port() {
+        assert_eq!(
+            normalize_next_url(
+                "http://paperless.local:8000/api/documents/?page=2",
+                "http://paperless.local:8000"
+            ),
+            "http://paperless.local:8000/api/documents/?page=2"
+        );
+    }
+
+    #[test]
+    fn fehlender_slash_vor_query_wird_ergaenzt() {
+        assert_eq!(
+            normalize_next_url("https://p.example.dev/api/documents?page=2", "https://p.example.dev"),
+            "https://p.example.dev/api/documents/?page=2"
+        );
+    }
+
+    #[test]
+    fn base_domain_schneidet_api_pfad_ab_und_behaelt_port() {
+        assert_eq!(base_domain("http://paperless.local:8000/api/documents/"), "http://paperless.local:8000");
+        assert_eq!(base_domain("https://paperless.example.dev/"), "https://paperless.example.dev");
+    }
 }
 
 #[tokio::main]
