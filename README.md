@@ -1,4 +1,7 @@
-# notionless
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+  <img src="assets/logo-light.svg" alt="notionless" width="310">
+</picture>
 
 Your Notion notes are stuck in Notion. Everything else you own (invoices, contracts,
 scanned mail, manuals) probably already lives in [Paperless-ngx](https://docs.paperless-ngx.com/),
@@ -82,6 +85,11 @@ it adopts what's already there instead of fighting it.
    *Internal Integration Secret*, and share the database with the integration under
    *Connections*. Without this step the API returns an empty list. The database needs a
    title column named `Name`.
+
+   To find the database ID for `NOTION_URL`, open the database as a full page in
+   Notion and look at the URL: `https://www.notion.so/<workspace>/<DATABASE_ID>?v=...`.
+   `DATABASE_ID` is the 32-character string right before `?v=` (dashes optional, the
+   API accepts it either way).
 2. **Create a Paperless API token.** Log in to the Django admin panel at
    `<PAPERLESS_URL>/admin/authtoken/tokenproxy/` (requires an admin/superuser account),
    add a token, and pick your user.

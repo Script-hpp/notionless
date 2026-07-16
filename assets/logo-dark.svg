@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 140" width="620" height="140">
+  <text x="0" y="100" font-family="Manrope, sans-serif" font-weight="700" font-size="88" letter-spacing="-1" fill="#F4F3F1">notionless</text>
+  <g transform="translate(505, 50)">
+    <circle cx="13" cy="20" r="13" fill="none" stroke="#7ED9A6" stroke-width="7"></circle>
+    <line x1="30" y1="20" x2="55" y2="20" stroke="#7ED9A6" stroke-width="7" stroke-linecap="round"></line>
+    <polygon points="52,8 76,20 52,32" fill="#7ED9A6"></polygon>
+    <circle cx="66" cy="20" r="13" fill="#7ED9A6"></circle>
+  </g>
+</svg>
